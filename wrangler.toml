@@ -38,4 +38,4 @@ max_batch_timeout = 30
 max_retries = 3
 
 [triggers]
-crons = ["0 23 * * *"]
+crons = ["0 */6 * * *"]

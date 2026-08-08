@@ -2,7 +2,7 @@
   "name": "fde-radar",
   "version": "0.1.0",
   "private": true,
-  "description": "日本のフロントエンド開発動向を集約する Astro + Hono + Cloudflare Workers アプリ",
+  "description": "AI Forward Deployed Engineering の公式シグナルを集約する日本語レーダー",
   "type": "module",
   "scripts": {
     "dev": "astro dev",

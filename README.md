@@ -1,12 +1,12 @@
 # FDE RADAR
 
-日本を中心に、Web とデジタルの変化を「会社の参考」と「個人の参考」の両方から読めるように整理する、公開型の技術・業界動向サイトです。
+**AI Forward Deployed Engineer / Engineering** の採用、企業導入、本番運用、評価、安全・ガバナンスを定期収集する公開型の日本語リファレンスです。
 
-FDE はここでは **Front-end Development Engineering** を中心とした広い領域を指します。対象は開発者だけではありません。サービス、組織、採用、学び方、アクセシビリティなど、変化の影響を知りたい人が判断材料として使えることを目指します。
+対象はエンジニアだけではありません。AIを導入する企業、FDEという役割を知りたい人、キャリアを検討する人が、一次情報を起点に「現場で何が変わるか」を理解できることを目指します。
 
 ## 技術構成
 
-- **Astro**: SEO を意識した公開フロントエンド
+- **Astro**: SEO を意識した公開サイト
 - **Hono**: Worker 内の `/api/*` と ingest の HTTP 入口
 - **Cloudflare Workers Static Assets**: Astro の静的アセット配信
 - **D1 + FTS5**: 記事メタデータ、タイムライン、初期の全文検索
@@ -17,7 +17,7 @@ FDE はここでは **Front-end Development Engineering** を中心とした広�
 
 ## 実装済みの取得フロー
 
-Cron は Source Registry を読み、Source ID の配列を 1 件の Queue message にまとめて dispatch します。Consumer は各 Source を次の順で試します。
+Cron は Source Registry を読み、Source ID の配列を Queue に送ります。Consumer は各 Source に設定された公開面を使い、次の優先順位で取得します。
 
 ```text
 API → RSS / Atom → 静的 HTML（HTMLRewriter）
@@ -25,7 +25,18 @@ API → RSS / Atom → 静的 HTML（HTMLRewriter）
 
 取得済みの Source では `ETag` と `Last-Modified` を再送し、`304` は再保存しません。`429` は `Retry-After` を尊重し、指数バックオフと `backoff_until` を D1 に記録します。`403 / 401 / CAPTCHA / ログイン壁` を迂回せず、明示された次の取得面だけに降格します。
 
-各成功・失敗は `fetch_runs` と `sources` に記録されます。正規化 URL の SHA-256、記事 URL の UNIQUE 制約、`source_id + external_item_id`、D1 FTS5 の日本語分かち書きで重複と検索を処理します。許可された構造化データだけを PostgreSQL の `fde.source_archives` に保存します。Hyperdrive が未接続のローカル環境では、R2 binding がある場合だけ R2 に fallback します。
+タイトルに AI と書かれているだけでは公開しません。顧客、導入、本番化、評価、運用、採用役割などの複合条件から FDE 関連度を採点し、基準未満の一般 AI ニュースや一般開発記事を除外します。
+
+各成功・失敗は `fetch_runs` と `sources` に記録されます。正規化 URL の SHA-256、記事 URL の UNIQUE 制約、D1 FTS5 の日本語分かち書きで重複と検索を処理します。許可された構造化データだけを PostgreSQL の `fde.source_archives` に保存します。Hyperdrive が未接続のローカル環境では、R2 binding がある場合だけ R2 に fallback します。
+
+## 監視する情報源
+
+- 上流一次情報: OpenAI News、Anthropic Careers、Scale AI Careers、Palantir Blog
+- 日本の求人: AI Native Careers、TokyoDev
+- 日本の現場共有: Qiita API、Zenn RSS
+- 日本のニュース発見: Yahoo!ニュース IT RSS
+
+Yahoo!ニュースは発見用の二次情報として区別します。記事本文は転載せず、メタデータ、短い要約、出典リンクのみを公開します。
 
 本番の手動確認用 API は `POST /api/ingest/dispatch`、状態確認用 API は `GET /api/ingest/status` です。`INGEST_TOKEN` secret を設定した場合、dispatch は `Authorization: Bearer <token>` が必要です。
 
@@ -58,7 +69,7 @@ R2 はこの構成では必須ではありません。既存の Workers VPC + Hy
 
 ## Git / 公開リポジトリ
 
-このリポジトリは小さなコミットを積み上げる前提です。推奨の区切りは、`scaffold`、`content-model`、`frontend`、`worker-ingest`、`docs` です。公開する際は、Cloudflare のリソース ID や API キーをコミットしないでください。
+このリポジトリは小さなコミットを積み上げる前提です。API キー、データベースの接続情報、`INGEST_TOKEN` はコミットしません。
 
 ## ライセンス
 

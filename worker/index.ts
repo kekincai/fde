@@ -4,7 +4,7 @@ import { XMLParser } from 'fast-xml-parser';
 import { Hono } from 'hono';
 import postgres from 'postgres';
 
-import { sourceRegistry, type SourceRecord } from './sourceRegistry';
+import { sourceRegistry, type SourceKind, type SourceRecord } from './sourceRegistry';
 
 export type IngestMessage = {
   sourceIds?: string[];
@@ -30,6 +30,7 @@ type DbSourceRow = {
   fetch_mode: SourceRecord['fetchMode'];
   language: SourceRecord['language'];
   country: SourceRecord['country'];
+  source_kind: SourceKind;
   priority: number;
   poll_interval_minutes: number;
   etag: string | null;
@@ -45,6 +46,11 @@ type DiscoveredItem = {
   summary: string;
   publishedAt: string;
   tags: string[];
+  signalType: string;
+  location: string;
+  sector: string;
+  countryRelevance: 'JP' | 'APAC' | 'GLOBAL';
+  fdeScore: number;
 };
 
 type FetchMeta = {
@@ -54,90 +60,93 @@ type FetchMeta = {
   notModified?: boolean;
 };
 
-type FetchFailure = Error & {
-  status?: number;
-  retryAfterSeconds?: number;
-};
+type FetchFailure = Error & { status?: number; retryAfterSeconds?: number };
 
-const MAX_BODY_BYTES = 1_500_000;
-const USER_AGENT = 'FDE-Radar/0.1 (+https://github.com/kekincai/fde)';
+const MAX_BODY_BYTES = 6_000_000;
+const USER_AGENT = 'FDE-Radar/0.2 (+https://github.com/kekincai/fde)';
 const app = new Hono<{ Bindings: Env }>();
 
-app.get('/api/health', (c) =>
-  c.json({
-    ok: true,
-    service: 'fde-radar-api',
-    architecture: 'Astro + Hono + Workers + D1/FTS5 + Hyperdrive/PostgreSQL + KV + Queues (R2 optional)',
-    time: new Date().toISOString()
-  })
-);
+const ROLE_PATTERN = /(forward deployed|deployment engineer|deployment engineering|applied ai (engineer|architect)|technical deployment lead|customer deployment|beneficial deployments|フォワード.?デプロイド|AI導入エンジニア|AIソリューションエンジニア)/i;
+const AI_PATTERN = /\b(ai|artificial intelligence|llm|large language model|generative ai|genai|agentic|model)\b|生成AI|人工知能/i;
+const FIELD_PATTERN = /(customer|client|enterprise|government|public sector|現場|顧客|企業)/i;
+const DELIVERY_PATTERN = /(deploy|deployment|production|rollout|adoption|implementation|integrat|workflow|pilot|本番|導入|実装|運用)/i;
+const QUALITY_PATTERN = /(eval|evaluation|reliability|observability|guardrail|security|governance|safety|品質|評価|安全|ガバナンス)/i;
 
-app.get('/api/config', async (c) => {
-  const cached = await c.env.CACHE?.get('config:public', 'json').catch(() => null);
-  return c.json(
-    cached ?? {
-      topics: ['仕事への影響', '会社の実践', '暮らしとサービス', 'Webの変化', '学び方', 'イベント'],
-      audiences: ['company', 'personal']
-    }
-  );
-});
+app.get('/api/health', (c) => c.json({
+  ok: true,
+  service: 'ai-fde-radar-api',
+  architecture: 'Astro + Hono + Workers + D1/FTS5 + Hyperdrive/PostgreSQL + KV + Queues',
+  time: new Date().toISOString()
+}));
+
+app.get('/api/config', (c) => c.json({
+  topics: ['すべて', '導入事例', '本番化・運用', '評価・品質', '安全・ガバナンス', '採用・役割'],
+  regions: ['ALL', 'JP', 'APAC', 'GLOBAL'],
+  audiences: ['business', 'career']
+}));
 
 app.get('/api/articles', async (c) => {
   const query = c.req.query('q')?.trim() ?? '';
-  const country = c.req.query('country') ?? 'ALL';
-  const topic = c.req.query('topic') ?? 'すべて';
-  const limit = Math.min(Math.max(Number(c.req.query('limit') ?? 20), 1), 50);
-
+  const region = c.req.query('region') ?? c.req.query('country') ?? 'ALL';
+  const signalType = c.req.query('signal') ?? c.req.query('topic') ?? 'すべて';
+  const limit = Math.min(Math.max(Number(c.req.query('limit') ?? 30), 1), 50);
   try {
-    const searchQuery = query ? buildFtsQuery(query) : '';
-    if (searchQuery) {
-      const result = await c.env.DB.prepare(
-        `SELECT a.*, s.name AS source_name
-         FROM articles_fts f
-         JOIN articles a ON a.id = f.article_id
-         JOIN sources s ON s.id = a.source_id
-         WHERE articles_fts MATCH ?
-         ORDER BY a.published_at DESC LIMIT ?`
-      )
-        .bind(searchQuery, limit)
-        .all();
-      return c.json({ articles: result.results, source: 'd1-fts5' }, 200, {
-        'Cache-Control': 'public, max-age=30, s-maxage=300'
-      });
-    }
-
-    const clauses = ['a.status = \'published\''];
+    const clauses = ["a.status = 'published'", 'a.fde_score >= 4'];
     const values: Array<string | number> = [];
-    if (country !== 'ALL') {
+    if (region !== 'ALL') {
       clauses.push('a.country_relevance = ?');
-      values.push(country);
+      values.push(region);
     }
-    if (topic !== 'すべて') {
-      clauses.push('a.topic = ?');
-      values.push(topic);
+    if (signalType !== 'すべて') {
+      clauses.push('a.signal_type = ?');
+      values.push(signalType);
+    }
+    const searchQuery = query ? buildFtsQuery(query) : '';
+    const from = searchQuery
+      ? 'articles_fts f JOIN articles a ON a.id = f.article_id JOIN sources s ON s.id = a.source_id'
+      : 'articles a JOIN sources s ON s.id = a.source_id';
+    if (searchQuery) {
+      clauses.unshift('articles_fts MATCH ?');
+      values.unshift(searchQuery);
     }
     values.push(limit);
     const result = await c.env.DB.prepare(
-      `SELECT a.*, s.name AS source_name
-       FROM articles a JOIN sources s ON s.id = a.source_id
+      `SELECT a.*, s.name AS source_name, s.source_kind
+       FROM ${from}
        WHERE ${clauses.join(' AND ')}
-       ORDER BY a.published_at DESC LIMIT ?`
-    )
-      .bind(...values)
-      .all();
-    return c.json({ articles: result.results, source: 'd1' }, 200, {
+       ORDER BY a.published_at DESC, a.fde_score DESC LIMIT ?`
+    ).bind(...values).all();
+    return c.json({ articles: result.results, source: searchQuery ? 'd1-fts5' : 'd1' }, 200, {
       'Cache-Control': 'public, max-age=30, s-maxage=300'
     });
   } catch (error) {
-    return c.json(
-      {
-        articles: [],
-        source: 'fallback',
-        message: 'D1 が未接続のため、ローカル表示は静的サンプルを使用します。',
-        error: error instanceof Error ? error.message : 'unknown error'
-      },
-      200
-    );
+    return c.json({ articles: [], source: 'unavailable', error: errorMessage(error) }, 503);
+  }
+});
+
+app.get('/api/overview', async (c) => {
+  try {
+    const [counts, sources, latest] = await Promise.all([
+      c.env.DB.prepare(
+        `SELECT COUNT(*) AS total,
+          SUM(CASE WHEN country_relevance = 'JP' THEN 1 ELSE 0 END) AS japan,
+          SUM(CASE WHEN signal_type = '採用・役割' THEN 1 ELSE 0 END) AS careers
+         FROM articles WHERE status = 'published' AND fde_score >= 4`
+      ).first(),
+      c.env.DB.prepare(
+        `SELECT id, name, source_kind, homepage, last_success_at, last_error_at, consecutive_failures
+         FROM sources WHERE allowed_fetch = 1 ORDER BY priority DESC`
+      ).all(),
+      c.env.DB.prepare(
+        `SELECT MAX(discovered_at) AS last_ingested_at, MAX(published_at) AS latest_published_at
+         FROM articles WHERE status = 'published' AND fde_score >= 4`
+      ).first()
+    ]);
+    return c.json({ counts, sources: sources.results, ...latest }, 200, {
+      'Cache-Control': 'public, max-age=30, s-maxage=300'
+    });
+  } catch (error) {
+    return c.json({ counts: { total: 0, japan: 0, careers: 0 }, sources: [], error: errorMessage(error) }, 503);
   }
 });
 
@@ -145,8 +154,8 @@ app.get('/api/ingest/status', async (c) => {
   try {
     const [sources, runs] = await Promise.all([
       c.env.DB.prepare(
-        `SELECT id, name, fetch_mode, last_success_at, last_error_at, consecutive_failures, backoff_until
-         FROM sources ORDER BY priority DESC`
+        `SELECT id, name, source_kind, fetch_mode, last_success_at, last_error_at, consecutive_failures, backoff_until
+         FROM sources WHERE allowed_fetch = 1 ORDER BY priority DESC`
       ).all(),
       c.env.DB.prepare(
         `SELECT source_id, status, discovered_count, unique_count, error_message, started_at, finished_at
@@ -155,7 +164,7 @@ app.get('/api/ingest/status', async (c) => {
     ]);
     return c.json({ sources: sources.results, runs: runs.results });
   } catch (error) {
-    return c.json({ sources: [], runs: [], message: error instanceof Error ? error.message : 'unknown error' }, 200);
+    return c.json({ sources: [], runs: [], error: errorMessage(error) }, 503);
   }
 });
 
@@ -164,24 +173,24 @@ app.post('/api/ingest/dispatch', async (c) => {
   const payload = (await c.req.json().catch(() => ({}))) as IngestMessage;
   const sourceIds = payload.sourceIds?.length ? payload.sourceIds : sourceRegistry.map((source) => source.id);
   await c.env.INGEST_QUEUE.send({ sourceIds, reason: 'manual' });
-  await c.env.CACHE?.put('ingest:last-dispatch', new Date().toISOString(), { expirationTtl: 60 * 60 * 24 });
+  await c.env.CACHE.put('ingest:last-dispatch', new Date().toISOString(), { expirationTtl: 172800 });
   return c.json({ queued: sourceIds.length, sourceIds });
 });
 
-async function readSources(env: Env, sourceIds?: string[]): Promise<SourceRecord[]> {
-  const selected = sourceIds?.length
-    ? sourceRegistry.filter((source) => sourceIds.includes(source.id))
-    : sourceRegistry;
+async function readSources(env: Env, sourceIds?: string[], force = false): Promise<SourceRecord[]> {
   const now = new Date().toISOString();
-
   try {
-    const result = await env.DB.prepare(
-      `SELECT id, name, homepage, feed_url, api_url, fetch_mode, language, country, priority,
-              poll_interval_minutes, etag, last_modified, consecutive_failures, backoff_until
+    const dueClause = force ? '' : "AND (last_success_at IS NULL OR datetime(last_success_at, '+' || poll_interval_minutes || ' minutes') <= datetime(?))";
+    const statement = env.DB.prepare(
+      `SELECT id, name, homepage, feed_url, api_url, fetch_mode, language, country, source_kind,
+              priority, poll_interval_minutes, etag, last_modified, consecutive_failures, backoff_until
        FROM sources
-       WHERE allowed_fetch = 1 AND (backoff_until IS NULL OR backoff_until <= ?)
+       WHERE allowed_fetch = 1 AND (backoff_until IS NULL OR backoff_until <= ?) ${dueClause}
        ORDER BY priority DESC`
-    ).bind(now).all<DbSourceRow>();
+    );
+    const result = force
+      ? await statement.bind(now).all<DbSourceRow>()
+      : await statement.bind(now, now).all<DbSourceRow>();
     return result.results
       .filter((source) => !sourceIds?.length || sourceIds.includes(source.id))
       .map((source) => ({
@@ -193,6 +202,7 @@ async function readSources(env: Env, sourceIds?: string[]): Promise<SourceRecord
         fetchMode: source.fetch_mode,
         language: source.language,
         country: source.country,
+        kind: source.source_kind,
         priority: source.priority,
         pollIntervalMinutes: source.poll_interval_minutes,
         etag: source.etag ?? undefined,
@@ -201,34 +211,29 @@ async function readSources(env: Env, sourceIds?: string[]): Promise<SourceRecord
         backoffUntil: source.backoff_until ?? undefined
       }));
   } catch {
-    // UI/local development can run without a D1 binding or migration.
-    return selected;
+    return sourceRegistry.filter((source) => !sourceIds?.length || sourceIds.includes(source.id));
   }
 }
 
 async function fetchSourceItems(source: SourceRecord): Promise<{ items: DiscoveredItem[]; meta: FetchMeta }> {
-  const candidates: Array<{ mode: SourceRecord['fetchMode']; url?: string }> = [
-    { mode: 'api' as const, url: source.apiUrl ? apiUrlForSource(source) : undefined },
+  const candidates = [
+    { mode: 'api' as const, url: source.apiUrl },
     { mode: 'rss' as const, url: source.feedUrl },
-    { mode: 'html' as const, url: source.homepage }
-  ].filter((candidate) => candidate.url);
+    { mode: 'html' as const, url: source.fetchMode === 'html' ? source.homepage : undefined }
+  ].filter((candidate): candidate is { mode: SourceRecord['fetchMode']; url: string } => Boolean(candidate.url));
   let lastError: FetchFailure | undefined;
-
   for (const candidate of candidates) {
     try {
-      const result = await fetchWithPolicy(source, candidate.url as string);
+      const result = await fetchWithPolicy(source, candidate.url);
       if (result.notModified) return { items: [], meta: { ...result, mode: candidate.mode } };
-      const items = candidate.mode === 'api'
+      const discovered = candidate.mode === 'api'
         ? await parseApiResponse(source, result.response)
         : candidate.mode === 'rss'
           ? await parseRssResponse(source, result.response)
           : await parseHtmlResponse(source, result.response);
-      if (!items.length && candidate.mode !== 'html') throw new Error(`${source.name}: ${candidate.mode} returned no usable items`);
-      return { items, meta: { ...result, mode: candidate.mode } };
+      return { items: discovered.filter((item) => item.fdeScore >= 4), meta: { ...result, mode: candidate.mode } };
     } catch (error) {
       lastError = error as FetchFailure;
-      // A source may expose both API and RSS. A 429/403 on one surface must not
-      // make us bypass its policy; it only allows an explicitly listed fallback.
     }
   }
   throw lastError ?? new Error(`${source.name}: no fetch surface configured`);
@@ -241,18 +246,15 @@ async function fetchWithPolicy(source: SourceRecord, url: string): Promise<{ res
   });
   if (source.etag) headers.set('if-none-match', source.etag);
   if (source.lastModified) headers.set('if-modified-since', source.lastModified);
-
   const response = await fetch(url, { headers });
-  if (response.status === 304) {
-    return { response, etag: source.etag ?? null, lastModified: source.lastModified ?? null, notModified: true };
-  }
+  if (response.status === 304) return { response, etag: source.etag ?? null, lastModified: source.lastModified ?? null, notModified: true };
   if (response.status === 429) {
     const failure = new Error(`${source.name}: HTTP 429`) as FetchFailure;
     failure.status = 429;
     failure.retryAfterSeconds = parseRetryAfter(response.headers.get('retry-after'));
     throw failure;
   }
-  if (response.status === 403 || response.status === 401) {
+  if (response.status === 401 || response.status === 403) {
     const failure = new Error(`${source.name}: HTTP ${response.status}; manual review required`) as FetchFailure;
     failure.status = response.status;
     throw failure;
@@ -260,35 +262,62 @@ async function fetchWithPolicy(source: SourceRecord, url: string): Promise<{ res
   if (!response.ok) throw new Error(`${source.name}: HTTP ${response.status}`);
   const contentLength = Number(response.headers.get('content-length') ?? 0);
   if (contentLength > MAX_BODY_BYTES) throw new Error(`${source.name}: response exceeds ${MAX_BODY_BYTES} bytes`);
-  return {
-    response,
-    etag: response.headers.get('etag'),
-    lastModified: response.headers.get('last-modified')
-  };
+  return { response, etag: response.headers.get('etag'), lastModified: response.headers.get('last-modified') };
 }
 
 async function parseApiResponse(source: SourceRecord, response: Response): Promise<DiscoveredItem[]> {
-  const json = (await response.json()) as unknown;
-  const rawItems = Array.isArray(json) ? json : (json as { items?: unknown[] })?.items ?? [];
-  const qiitaTags = new Set(['javascript', 'typescript', 'react', 'vue.js', 'nuxt.js', 'next.js', 'astro', 'svelte', 'css', 'html', 'web', 'node.js', 'vite', 'playwright', 'accessibility', 'performance', 'ai']);
-  return rawItems.slice(0, 30).flatMap((raw) => {
-    const item = raw as Record<string, unknown>;
-    const tags = Array.isArray(item.tags)
-      ? item.tags.slice(0, 8).map((tag) => typeof tag === 'string' ? tag : String((tag as Record<string, unknown>).name ?? ''))
-      : [];
-    if (source.id === 'qiita' && !tags.some((tag) => qiitaTags.has(tag.trim().toLowerCase()))) return [];
-    const url = String(item.url ?? item.html_url ?? '');
-    const title = stripMarkup(String(item.title ?? item.name ?? ''));
+  const json = await response.json() as { jobs?: Array<Record<string, unknown>> } | Array<Record<string, unknown>>;
+  const rawItems = Array.isArray(json) ? json : json.jobs ?? [];
+  return rawItems.slice(0, 800).flatMap((item) => {
+    if (source.id === 'qiita-fde-fieldnotes') return parseQiitaItem(item);
+    const title = cleanText(String(item.title ?? item.name ?? ''));
+    const location = cleanText(String((item.location as Record<string, unknown> | undefined)?.name ?? ''));
+    const content = cleanText(String(item.content ?? item.description ?? ''));
+    const haystack = `${title} ${content}`;
+    if (!ROLE_PATTERN.test(title) || !AI_PATTERN.test(haystack)) return [];
+    const score = scoreFde(haystack, true);
+    const url = String(item.absolute_url ?? item.url ?? '');
     if (!url || !title) return [];
+    const company = source.name.replace(' Careers', '');
     return [{
       externalItemId: String(item.id ?? url),
       url,
       title,
-      summary: stripMarkup(String(item.body ?? item.description ?? `${source.name} からの更新です。`)).slice(0, 280),
-      publishedAt: safeIsoDate(String(item.created_at ?? item.published_at ?? item.updated_at ?? Date.now())),
-      tags: tags.length ? tags : ['Webの変化']
+      summary: `${company}が${location || '複数地域'}で募集する、顧客のAI導入を設計から本番運用まで担うポジションです。`,
+      publishedAt: safeIsoDate(String(item.updated_at ?? item.created_at ?? Date.now())),
+      tags: compactTags(['FDE', 'AI deployment', location, ...extractKeywords(haystack)]),
+      signalType: '採用・役割',
+      location,
+      sector: inferSector(haystack),
+      countryRelevance: inferRegion(location),
+      fdeScore: score
     }];
   });
+}
+
+function parseQiitaItem(item: Record<string, unknown>): DiscoveredItem[] {
+  const title = cleanText(String(item.title ?? ''));
+  const body = cleanText(String(item.body ?? item.rendered_body ?? '')).slice(0, 12_000);
+  const tags = Array.isArray(item.tags)
+    ? item.tags.map((tag) => cleanText(String((tag as Record<string, unknown>)?.name ?? ''))).filter(Boolean)
+    : [];
+  const haystack = `${title} ${body} ${tags.join(' ')}`;
+  const score = scoreFde(haystack, false);
+  const url = String(item.url ?? '');
+  if (!url || !title || score < 4 || !passesCommunityGate(title, haystack)) return [];
+  return [{
+    externalItemId: String(item.id ?? url),
+    url,
+    title,
+    summary: body.slice(0, 300),
+    publishedAt: safeIsoDate(String(item.updated_at ?? item.created_at ?? Date.now())),
+    tags: compactTags([...tags, ...extractKeywords(haystack)]),
+    signalType: inferSignalType(haystack),
+    location: '日本',
+    sector: inferSector(haystack),
+    countryRelevance: 'JP',
+    fdeScore: score
+  }];
 }
 
 async function parseRssResponse(source: SourceRecord, response: Response): Promise<DiscoveredItem[]> {
@@ -296,61 +325,98 @@ async function parseRssResponse(source: SourceRecord, response: Response): Promi
   const parsed = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_' }).parse(body);
   const entries = parsed.feed?.entry ?? parsed.rss?.channel?.item ?? parsed.channel?.item ?? [];
   const list = Array.isArray(entries) ? entries : [entries];
-  return list.slice(0, 30).flatMap((entry) => {
+  return list.slice(0, 60).flatMap((entry) => {
     const link = readFeedLink(entry?.link, source.homepage);
-    const title = stripMarkup(String(entry?.title ?? ''));
-    if (!link || !title) return [];
+    const title = cleanText(String(entry?.title ?? ''));
+    const rawSummary = cleanText(String(entry?.summary ?? entry?.description ?? entry?.['content:encoded'] ?? ''));
+    const tags = extractFeedTags(entry?.category);
+    const haystack = `${title} ${rawSummary} ${tags.join(' ')}`;
+    const score = scoreFde(haystack, false);
+    if (!link || !title || score < 4) return [];
+    if (source.kind === 'community' && !passesCommunityGate(title, haystack)) return [];
+    if (source.kind === 'news' && !(AI_PATTERN.test(title) && FIELD_PATTERN.test(haystack) && (DELIVERY_PATTERN.test(haystack) || QUALITY_PATTERN.test(haystack)))) return [];
+    const signalType = inferSignalType(haystack);
+    const location = inferLocation(haystack);
     return [{
-      externalItemId: String(entry?.id ?? link),
+      externalItemId: String(entry?.guid?.['#text'] ?? entry?.guid ?? entry?.id ?? link),
       url: link,
       title,
-      summary: stripMarkup(String(entry?.summary ?? entry?.description ?? '')).slice(0, 280),
+      summary: rawSummary.slice(0, 300) || `${source.name}が公開したAI導入・運用に関する更新です。`,
       publishedAt: safeIsoDate(String(entry?.published ?? entry?.pubDate ?? entry?.updated ?? Date.now())),
-      tags: extractFeedTags(entry?.category).length ? extractFeedTags(entry?.category) : ['Webの変化']
+      tags: compactTags([...tags, ...extractKeywords(haystack)]),
+      signalType,
+      location,
+      sector: inferSector(haystack),
+      countryRelevance: inferRegion(location || haystack),
+      fdeScore: score
     }];
   });
 }
 
 async function parseHtmlResponse(source: SourceRecord, response: Response): Promise<DiscoveredItem[]> {
+  if (source.id === 'ai-native-fde-career') return parseSingleCareerPage(source, response);
   const candidates: DiscoveredItem[] = [];
-  const seen = new Set<string>();
   let active: { url: string; title: string } | undefined;
-  const rewriter = new HTMLRewriter();
-  const capture = (element: Element) => {
-    const href = element.getAttribute('href');
-    if (!href) return;
-    let url: string;
-    try { url = new URL(href, source.homepage).toString(); } catch { return; }
-    if (!/^https?:/i.test(url) || url === source.homepage || seen.has(url)) return;
-    const candidate = { url, title: '' };
-    active = candidate;
-    element.onEndTag(() => {
-      const title = stripMarkup(candidate.title);
-      if (title.length >= 8 && title.length <= 180 && !/^(home|menu|login|read more)$/i.test(title)) {
-        seen.add(url);
-        candidates.push({
-          externalItemId: url,
-          url,
+  const rewriter = new HTMLRewriter().on('main a[href]', {
+    element(element) {
+      const href = element.getAttribute('href');
+      if (!href) return;
+      try { active = { url: new URL(href, source.homepage).toString(), title: '' }; } catch { active = undefined; }
+      const current = active;
+      element.onEndTag(() => {
+        if (!current) return;
+        const title = cleanText(current.title);
+        const score = scoreFde(title, source.kind === 'careers');
+        if (title.length >= 8 && score >= 4) candidates.push({
+          externalItemId: current.url,
+          url: current.url,
           title,
-          summary: `${source.name} の公開ページから見つけた更新です。`,
+          summary: `${source.name}の公式ページで確認されたAI FDE関連の更新です。`,
           publishedAt: new Date().toISOString(),
-          tags: ['Webの変化']
+          tags: compactTags(['FDE', ...extractKeywords(title)]),
+          signalType: source.kind === 'careers' ? '採用・役割' : inferSignalType(title),
+          location: inferLocation(title),
+          sector: inferSector(title),
+          countryRelevance: inferRegion(title),
+          fdeScore: score
         });
-      }
-      if (active === candidate) active = undefined;
-    });
-  };
-  for (const selector of ['article h2 a', 'article h3 a', 'main h2 a', 'main h3 a', '.post a', '.entry-title a']) {
-    rewriter.on(selector, {
-      element: capture,
-      text: (text) => { if (active) active.title += text.text; }
-    });
-  }
+        if (active === current) active = undefined;
+      });
+    },
+    text(text) { if (active) active.title += text.text; }
+  });
   await rewriter.transform(response).arrayBuffer();
-  return candidates.slice(0, 30);
+  return candidates.slice(0, 50);
 }
 
-async function ingestSource(env: Env, source: SourceRecord): Promise<{ discovered: number; unique: number; mode: string; notModified: boolean }> {
+async function parseSingleCareerPage(source: SourceRecord, response: Response): Promise<DiscoveredItem[]> {
+  let title = '';
+  let description = '';
+  const rewriter = new HTMLRewriter()
+    .on('title', { text(text) { title += text.text; } })
+    .on('meta[name="description"]', { element(element) { description = element.getAttribute('content') ?? ''; } });
+  await rewriter.transform(response).arrayBuffer();
+  title = cleanText(title);
+  description = cleanText(description);
+  const haystack = `${title} ${description}`;
+  const score = scoreFde(haystack, true);
+  if (!title || score < 4) return [];
+  return [{
+    externalItemId: source.homepage,
+    url: source.homepage,
+    title,
+    summary: description.slice(0, 300),
+    publishedAt: new Date().toISOString(),
+    tags: compactTags(['FDE', 'AI導入', ...extractKeywords(haystack)]),
+    signalType: '採用・役割',
+    location: '日本',
+    sector: inferSector(haystack),
+    countryRelevance: 'JP',
+    fdeScore: score
+  }];
+}
+
+async function ingestSource(env: Env, source: SourceRecord): Promise<{ discovered: number; unique: number }> {
   const startedAt = new Date().toISOString();
   const runId = crypto.randomUUID();
   try {
@@ -362,30 +428,21 @@ async function ingestSource(env: Env, source: SourceRecord): Promise<{ discovere
       const id = crypto.randomUUID();
       const urlHash = await sha256(canonicalUrl);
       const titleNormalized = item.title.normalize('NFKC').toLowerCase();
-      const topic = inferTopic(item.title, item.tags);
-      const searchTokensJa = tokenizeJapanese(`${item.title} ${item.summary} ${item.tags.join(' ')}`);
+      const searchTokensJa = tokenizeJapanese(`${item.title} ${item.summary} ${item.tags.join(' ')} ${item.location} ${item.sector}`);
+      const impacts = impactCopy(item.signalType);
       const inserted = await env.DB.prepare(
         `INSERT OR IGNORE INTO articles
-        (id, canonical_url, canonical_url_hash, external_item_id, source_id, title, title_normalized, summary, language, country_relevance, topic, tags, search_tokens_ja, published_at, japan_score, quality_score, trend_score)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        (id, canonical_url, canonical_url_hash, external_item_id, source_id, title, title_normalized,
+         summary, language, country_relevance, topic, tags, search_tokens_ja, published_at,
+         japan_score, quality_score, trend_score, signal_type, location, sector, fde_score,
+         why_it_matters, company_impact, career_impact)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).bind(
-        id,
-        canonicalUrl,
-        urlHash,
-        item.externalItemId,
-        source.id,
-        item.title,
-        titleNormalized,
-        item.summary,
-        source.language,
-        source.country,
-        topic,
-        item.tags.join(' '),
-        searchTokensJa,
-        item.publishedAt,
-        source.country === 'JP' ? 1 : 0.55,
-        Math.min(1, source.priority / 100),
-        Math.min(1, source.priority / 100)
+        id, canonicalUrl, urlHash, item.externalItemId, source.id, item.title, titleNormalized,
+        item.summary, source.language, item.countryRelevance, item.signalType, item.tags.join(' '),
+        searchTokensJa, item.publishedAt, item.countryRelevance === 'JP' ? 1 : item.countryRelevance === 'APAC' ? 0.75 : 0.45,
+        source.priority / 100, item.fdeScore / 10, item.signalType, item.location, item.sector,
+        item.fdeScore, impacts.why, impacts.company, impacts.career
       ).run();
       if (inserted.meta.changes > 0) {
         unique += 1;
@@ -399,31 +456,86 @@ async function ingestSource(env: Env, source: SourceRecord): Promise<{ discovere
        VALUES (?, ?, ?, ?, ?, ?, ?)`
     ).bind(runId, source.id, result.meta.notModified ? 'not_modified' : 'success', result.items.length, unique, startedAt, new Date().toISOString()).run();
     await markSourceSuccess(env, source, result.meta);
-    await persistArchive(env, source, result.items, result.meta.mode, startedAt);
-    return { discovered: result.items.length, unique, mode: result.meta.mode, notModified: Boolean(result.meta.notModified) };
+    if (!result.meta.notModified) await persistArchive(env, source, result.items, result.meta.mode, startedAt);
+    return { discovered: result.items.length, unique };
   } catch (error) {
     const failure = error as FetchFailure;
-    const message = failure instanceof Error ? failure.message : 'unknown error';
     await env.DB.prepare(
       `INSERT INTO fetch_runs (id, source_id, status, error_message, started_at, finished_at)
        VALUES (?, ?, 'error', ?, ?, ?)`
-    ).bind(runId, source.id, message, startedAt, new Date().toISOString()).run().catch(() => undefined);
+    ).bind(runId, source.id, errorMessage(error), startedAt, new Date().toISOString()).run().catch(() => undefined);
     await markSourceFailure(env, source, failure);
     throw error;
   }
 }
 
-async function persistArchive(
-  env: Env,
-  source: SourceRecord,
-  items: DiscoveredItem[],
-  mode: SourceRecord['fetchMode'],
-  fetchedAt: string
-): Promise<void> {
-  const payload = { sourceId: source.id, items, fetchedAt, mode };
-  const serialized = JSON.stringify(payload);
-  const contentHash = await sha256(serialized);
+function scoreFde(value: string, career: boolean): number {
+  let score = 0;
+  if (ROLE_PATTERN.test(value)) score += career ? 6 : 5;
+  if (AI_PATTERN.test(value)) score += 1;
+  if (FIELD_PATTERN.test(value)) score += 1;
+  if (DELIVERY_PATTERN.test(value)) score += 2;
+  if (QUALITY_PATTERN.test(value)) score += 1;
+  if (/^how .+ (uses|builds|deploys|adopts)/i.test(value)) score += 3;
+  return Math.min(10, score);
+}
 
+function passesCommunityGate(title: string, haystack: string): boolean {
+  if (ROLE_PATTERN.test(title) || /\bFDE\b/i.test(title)) return true;
+  return AI_PATTERN.test(title)
+    && FIELD_PATTERN.test(haystack)
+    && (DELIVERY_PATTERN.test(haystack) || QUALITY_PATTERN.test(haystack));
+}
+
+function inferSignalType(value: string): string {
+  if (ROLE_PATTERN.test(value)) return '採用・役割';
+  if (QUALITY_PATTERN.test(value) && /(security|governance|safety|guardrail|安全|ガバナンス)/i.test(value)) return '安全・ガバナンス';
+  if (QUALITY_PATTERN.test(value)) return '評価・品質';
+  if (/(production|rollout|operation|observability|本番|運用)/i.test(value)) return '本番化・運用';
+  return '導入事例';
+}
+
+function inferRegion(value: string): 'JP' | 'APAC' | 'GLOBAL' {
+  if (/(tokyo|japan|japanese|日本|東京|大阪)/i.test(value)) return 'JP';
+  if (/(singapore|seoul|korea|sydney|australia|india|apac|asia|シンガポール|韓国|アジア)/i.test(value)) return 'APAC';
+  return 'GLOBAL';
+}
+
+function inferLocation(value: string): string {
+  const matches = value.match(/(Tokyo, Japan|Japan|Singapore|Seoul, South Korea|Sydney, Australia|London, UK|San Francisco, CA|New York(?: City)?, NY|Washington, DC)/i);
+  return matches?.[0] ?? '';
+}
+
+function inferSector(value: string): string {
+  if (/(government|public sector|defen[cs]e)/i.test(value)) return '公共・行政';
+  if (/(health|medical|life science)/i.test(value)) return '医療・ライフサイエンス';
+  if (/(financial|bank|insurance|fintech)/i.test(value)) return '金融';
+  if (/(manufactur|industrial|semiconductor)/i.test(value)) return '製造';
+  if (/(retail|commerce)/i.test(value)) return '小売・流通';
+  return '業界横断';
+}
+
+function extractKeywords(value: string): string[] {
+  const candidates = ['FDE', 'Applied AI', 'AI deployment', 'evaluation', 'production', 'security', 'governance', 'agents'];
+  return candidates.filter((candidate) => new RegExp(candidate.replace('FDE', 'forward deployed|FDE'), 'i').test(value));
+}
+
+function impactCopy(signalType: string): { why: string; company: string; career: string } {
+  if (signalType === '採用・役割') return {
+    why: '企業がAIを実験から本番へ移すために、どの役割と能力を必要としているかを示す一次情報です。',
+    company: '採用要件から、社内のAI導入チームに必要な技術・顧客理解・運用責任を逆算できます。',
+    career: 'FDEに求められる実装力、顧客との対話、評価と本番運用の経験を具体的に確認できます。'
+  };
+  return {
+    why: 'AIを顧客の業務に組み込み、評価し、本番で使われ続ける状態まで届ける方法を示す一次情報です。',
+    company: '自社のAI導入を、試作だけでなくデータ・評価・安全・定着まで含めて設計する参考になります。',
+    career: '現場課題の発見から実装、評価、導入後の改善まで、FDEが担う仕事の範囲を学べます。'
+  };
+}
+
+async function persistArchive(env: Env, source: SourceRecord, items: DiscoveredItem[], mode: SourceRecord['fetchMode'], fetchedAt: string): Promise<void> {
+  const serialized = JSON.stringify({ sourceId: source.id, items, fetchedAt, mode });
+  const contentHash = await sha256(serialized);
   if (env.HYPERDRIVE) {
     const sql = postgres(env.HYPERDRIVE.connectionString);
     try {
@@ -435,42 +547,32 @@ async function persistArchive(
     } finally {
       await sql.end({ timeout: 1 }).catch(() => undefined);
     }
-    return;
-  }
-
-  if (env.ARCHIVE) {
-    await env.ARCHIVE.put(
-      `ingest/${source.id}/${fetchedAt.replaceAll(':', '-')}.json`,
-      serialized
-    );
+  } else if (env.ARCHIVE) {
+    await env.ARCHIVE.put(`ingest/${source.id}/${fetchedAt.replaceAll(':', '-')}.json`, serialized);
   }
 }
 
 async function markSourceSuccess(env: Env, source: SourceRecord, meta: FetchMeta): Promise<void> {
   await env.DB.prepare(
-    `UPDATE sources
-     SET etag = ?, last_modified = ?, last_success_at = ?, consecutive_failures = 0,
-         backoff_until = NULL, updated_at = CURRENT_TIMESTAMP
-     WHERE id = ?`
+    `UPDATE sources SET etag = ?, last_modified = ?, last_success_at = ?, consecutive_failures = 0,
+     backoff_until = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
   ).bind(meta.etag ?? source.etag ?? null, meta.lastModified ?? source.lastModified ?? null, new Date().toISOString(), source.id).run();
 }
 
 async function markSourceFailure(env: Env, source: SourceRecord, failure: FetchFailure): Promise<void> {
   const attempts = (source.consecutiveFailures ?? 0) + 1;
   const delaySeconds = failure.retryAfterSeconds ?? Math.min(86_400, 60 * 2 ** Math.min(attempts, 8));
-  const backoffUntil = new Date(Date.now() + delaySeconds * 1000).toISOString();
   await env.DB.prepare(
-    `UPDATE sources
-     SET last_error_at = ?, consecutive_failures = ?, backoff_until = ?, updated_at = CURRENT_TIMESTAMP
-     WHERE id = ?`
-  ).bind(new Date().toISOString(), attempts, backoffUntil, source.id).run().catch(() => undefined);
+    `UPDATE sources SET last_error_at = ?, consecutive_failures = ?, backoff_until = ?,
+     updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+  ).bind(new Date().toISOString(), attempts, new Date(Date.now() + delaySeconds * 1000).toISOString(), source.id).run().catch(() => undefined);
 }
 
 async function dispatchSources(env: Env): Promise<void> {
   const sources = await readSources(env);
   if (!sources.length) return;
   await env.INGEST_QUEUE.send({ sourceIds: sources.map((source) => source.id), reason: 'scheduled' });
-  await env.CACHE?.put('ingest:last-dispatch', new Date().toISOString(), { expirationTtl: 60 * 60 * 48 });
+  await env.CACHE.put('ingest:last-dispatch', new Date().toISOString(), { expirationTtl: 172800 });
 }
 
 function isAuthorized(request: Request, env: Env): boolean {
@@ -479,32 +581,24 @@ function isAuthorized(request: Request, env: Env): boolean {
 }
 
 function readFeedLink(rawLink: unknown, baseUrl: string): string | undefined {
-  const links = Array.isArray(rawLink) ? rawLink : [rawLink];
-  for (const link of links) {
+  for (const link of Array.isArray(rawLink) ? rawLink : [rawLink]) {
     const value = typeof link === 'string' ? link : (link as Record<string, unknown> | undefined)?.['@_href'] ?? (link as Record<string, unknown> | undefined)?.href;
     if (!value) continue;
-    try { return new URL(String(value), baseUrl).toString(); } catch { /* skip malformed item */ }
+    try { return new URL(String(value), baseUrl).toString(); } catch { /* malformed item */ }
   }
   return undefined;
 }
 
-function apiUrlForSource(source: SourceRecord): string {
-  const url = new URL(source.apiUrl as string);
-  if (source.id === 'qiita') {
-    url.searchParams.set('page', '1');
-    url.searchParams.set('per_page', '30');
-    url.searchParams.set('query', 'tag:JavaScript');
-  }
-  return url.toString();
+function extractFeedTags(raw: unknown): string[] {
+  return (Array.isArray(raw) ? raw : raw ? [raw] : []).slice(0, 8).map((tag) => {
+    if (typeof tag === 'string') return cleanText(tag);
+    const value = tag as Record<string, unknown>;
+    return cleanText(String(value?.['#text'] ?? value?.['@_term'] ?? value?.name ?? ''));
+  }).filter(Boolean);
 }
 
-function extractFeedTags(raw: unknown): string[] {
-  const list = Array.isArray(raw) ? raw : raw ? [raw] : [];
-  return list.slice(0, 8).map((tag) => {
-    if (typeof tag === 'string') return tag;
-    const value = tag as Record<string, unknown>;
-    return String(value?.['#text'] ?? value?.['@_term'] ?? value?.name ?? '');
-  }).filter(Boolean);
+function compactTags(tags: string[]): string[] {
+  return [...new Set(tags.map(cleanText).filter(Boolean))].slice(0, 10);
 }
 
 function parseRetryAfter(value: string | null): number | undefined {
@@ -520,19 +614,22 @@ function safeIsoDate(value: string): string {
   return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : new Date().toISOString();
 }
 
-function stripMarkup(value: string): string {
-  return value.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+function cleanText(value: string): string {
+  return value
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&(?:amp;)?lt;/g, '<').replace(/&(?:amp;)?gt;/g, '>')
+    .replace(/&(?:amp;)?quot;/g, '"').replace(/&#0?39;|&apos;/g, "'")
+    .replace(/&amp;/g, '&').replace(/&nbsp;/g, ' ')
+    .replace(/\s+/g, ' ').trim();
 }
 
 function normalizeUrl(value: string): string | undefined {
   try {
     const url = new URL(value);
-    ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term'].forEach((key) => url.searchParams.delete(key));
+    ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'source'].forEach((key) => url.searchParams.delete(key));
     url.hash = '';
     return url.toString().replace(/\/$/, '');
-  } catch {
-    return undefined;
-  }
+  } catch { return undefined; }
 }
 
 async function sha256(value: string): Promise<string> {
@@ -552,14 +649,8 @@ function buildFtsQuery(value: string): string {
   return tokenizeJapanese(value).split(/\s+/).filter(Boolean).map((token) => `"${token.replaceAll('"', '""')}"`).join(' OR ');
 }
 
-function inferTopic(title: string, tags: string[]): string {
-  const haystack = `${title} ${tags.join(' ')}`.toLowerCase();
-  if (/(ai|生成ai|採用|developer productivity|workflow|仕事)/i.test(haystack)) return '仕事への影響';
-  if (/(mercari|line|cyberagent|team|組織|migration|基盤|会社)/i.test(haystack)) return '会社の実践';
-  if (/(conf|conference|jsconf|event|イベント|cfp)/i.test(haystack)) return 'イベント';
-  if (/(accessibility|アクセシビリティ|privacy|security|安全|暮らし)/i.test(haystack)) return '暮らしとサービス';
-  if (/(learn|学習|tutorial|入門)/i.test(haystack)) return '学び方';
-  return 'Webの変化';
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : 'unknown error';
 }
 
 const worker = {
@@ -573,14 +664,11 @@ const worker = {
   },
   async queue(batch: MessageBatch<IngestMessage>, env: Env) {
     for (const message of batch.messages) {
-      const sources = await readSources(env, message.body.sourceIds);
+      const sources = await readSources(env, message.body.sourceIds, message.body.reason === 'manual');
       const failures: string[] = [];
       for (const source of sources) {
-        try {
-          await ingestSource(env, source);
-        } catch (error) {
-          failures.push(error instanceof Error ? `${source.id}: ${error.message}` : source.id);
-        }
+        try { await ingestSource(env, source); }
+        catch (error) { failures.push(`${source.id}: ${errorMessage(error)}`); }
       }
       if (failures.length) {
         console.error('ingest batch failed', failures);
