@@ -75,7 +75,7 @@ h2 { margin: 20px 0 16px; font-size: clamp(32px, 3.8vw, 50px); font-weight: 600;
 .definition { display: grid; grid-template-columns: 205px 1fr; gap: 50px; padding: 55px 0 110px; border-top: 1px solid var(--ink); }
 .definition-copy { max-width: 830px; }
 .definition-copy p { max-width: 650px; color: var(--muted); font-size: 13px; line-height: 2; }
-.delivery-flow { grid-column: 2; display: grid; grid-template-columns: repeat(5, 1fr); padding: 0; margin: 45px 0 0; list-style: none; border-top: 1px solid var(--ink); }
+.delivery-flow { grid-column: 2; display: grid; grid-template-columns: repeat(6, 1fr); padding: 0; margin: 45px 0 0; list-style: none; border-top: 1px solid var(--ink); }
 .delivery-flow li { position: relative; min-height: 120px; padding: 16px 12px 0 0; border-right: 1px solid var(--line); }
 .delivery-flow li::before { position: absolute; top: -4px; left: 0; width: 7px; height: 7px; border-radius: 50%; background: var(--green); content: ''; }
 .delivery-flow b { display: block; color: var(--green); font-size: 9px; }
@@ -116,7 +116,7 @@ h2 { margin: 20px 0 16px; font-size: clamp(32px, 3.8vw, 50px); font-weight: 600;
 .signal-meta { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; color: var(--muted); font-size: 9px; }
 .signal-meta i { width: 2px; height: 2px; border-radius: 50%; background: #a4aba7; }
 .source-kind { padding: 3px 6px; background: var(--green-soft); color: var(--green-dark); }
-.kind-careers { background: #f4dfd1; color: #9a431f; }.kind-community { background: #e4e4f3; color: #4e4d8b; }.kind-news { background: #ece8d5; color: #776b24; }
+.kind-careers { background: #f4dfd1; color: #9a431f; }.kind-community { background: #e4e4f3; color: #4e4d8b; }.kind-media { background: #ece8d5; color: #776b24; }.kind-government { background: #dce7f4; color: #315d83; }.kind-research, .kind-report { background: #eee3f4; color: #704187; }.kind-video { background: #f4e0e0; color: #934a4a; }
 .signal-type { margin-left: auto; color: var(--green); }
 .signal-main h3 { margin-bottom: 9px; font-size: 17px; line-height: 1.5; transition: color .2s; }
 .signal-main > p { max-width: 740px; margin-bottom: 13px; color: #5d6762; font-size: 11px; line-height: 1.85; display: -webkit-box; overflow: hidden; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }

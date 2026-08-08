@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 
-import { signalTypes, type Article, type Audience, type Region } from '../data/articles';
+import { pillarLabels, pillars, type Article, type Audience, type Region } from '../data/articles';
 
 type IconName = 'arrow' | 'bookmark' | 'clock' | 'external' | 'search' | 'refresh' | 'check';
 
@@ -22,6 +22,10 @@ type ApiArticle = {
   source_kind?: string;
   summary?: string;
   signal_type?: string;
+  pillar?: string;
+  subtopic?: string;
+  content_type?: string;
+  region?: string;
   country_relevance?: string;
   published_at?: string;
   canonical_url?: string;
@@ -31,6 +35,9 @@ type ApiArticle = {
   why_it_matters?: string;
   company_impact?: string;
   career_impact?: string;
+  summary_ja?: string;
+  customer_impact?: string;
+  engineering_impact?: string;
 };
 
 type SourceStatus = {
@@ -43,7 +50,7 @@ type SourceStatus = {
 };
 
 type Overview = {
-  counts?: { total?: number; japan?: number; careers?: number };
+  counts?: { total?: number; japan?: number; careers?: number; papers?: number; videos?: number };
   sources?: SourceStatus[];
   last_ingested_at?: string | null;
 };
@@ -69,22 +76,24 @@ function relativeTime(value?: string): string {
 
 function fromApi(raw: ApiArticle): Article | null {
   if (!raw.id || !raw.title || !raw.canonical_url) return null;
-  const region = raw.country_relevance === 'JP' || raw.country_relevance === 'APAC' ? raw.country_relevance : 'GLOBAL';
+  const region: Region = raw.region === 'Japan' || raw.country_relevance === 'JP' ? 'Japan' : 'Global';
   return {
     id: raw.id,
     title: raw.title,
     source: raw.source_name || '公式情報源',
-    sourceKind: raw.source_kind || 'deployment',
+    sourceKind: raw.source_kind || 'official',
     region,
-    signalType: raw.signal_type || '導入事例',
-    location: raw.location || (region === 'JP' ? '日本' : 'グローバル'),
+    pillar: raw.pillar || 'Customer',
+    subtopic: raw.subtopic || raw.signal_type || 'Use Case',
+    contentType: raw.content_type || 'news',
+    location: raw.location || (region === 'Japan' ? '日本' : 'グローバル'),
     sector: raw.sector || '業界横断',
     time: relativeTime(raw.published_at),
     date: raw.published_at ? new Intl.DateTimeFormat('ja-JP', { year: 'numeric', month: 'long', day: 'numeric' }).format(new Date(raw.published_at)) : '公開日不明',
-    summary: raw.summary || '公式情報源で公開されたAI導入に関する更新です。',
+    summary: raw.summary_ja || raw.summary || '公式情報源で公開されたAI導入に関する更新です。',
     whyItMatters: raw.why_it_matters || 'AIを実験から本番へ移す現場の変化を知る一次情報です。',
-    businessImpact: raw.company_impact || '自社の導入計画を考えるための参考になります。',
-    careerImpact: raw.career_impact || 'FDEに必要な役割と経験を知る参考になります。',
+    customerImpact: raw.customer_impact || raw.company_impact || '自社の導入計画を考えるための参考になります。',
+    engineeringImpact: raw.engineering_impact || raw.career_impact || 'FDEに必要な実装・評価・運用条件を知る参考になります。',
     url: raw.canonical_url,
     score: Number(raw.fde_score ?? 4)
   };
@@ -93,8 +102,13 @@ function fromApi(raw: ApiArticle): Article | null {
 function kindLabel(kind: string): string {
   if (kind === 'careers') return '採用情報';
   if (kind === 'community') return '現場共有';
-  if (kind === 'news') return 'ニュース発見';
-  return '公式発表';
+  if (kind === 'government') return '公共・制度';
+  if (kind === 'media') return '専門メディア';
+  if (kind === 'research') return '論文';
+  if (kind === 'report') return '調査レポート';
+  if (kind === 'video') return '動画';
+  if (kind === 'platform') return '製品・基盤';
+  return '公式情報';
 }
 
 function ArticleRow({ article, audience, open, saved, onOpen, onSave }: {
@@ -113,17 +127,17 @@ function ArticleRow({ article, audience, open, saved, onOpen, onSave }: {
           <span>{article.source}</span><i />
           <span>{article.location}</span><i />
           <span>{article.time}</span>
-          <span className="signal-type">{article.signalType}</span>
+          <span className="signal-type">{pillarLabels[article.pillar] ?? article.pillar} / {article.subtopic}</span>
         </div>
         <h3>{article.title}</h3>
         <p>{article.summary}</p>
-        <div className="signal-foot"><span>{article.sector}</span><span>FDE関連度 {article.score.toFixed(0)}/10</span></div>
+        <div className="signal-foot"><span>{article.contentType} · {article.sector}</span><span>FDE関連度 {article.score.toFixed(0)}/100</span></div>
       </button>
       <button className={`save-button ${saved ? 'is-saved' : ''}`} type="button" onClick={onSave} aria-label={saved ? '保存を解除' : '保存する'} aria-pressed={saved}><Icon name="bookmark" /></button>
       {open && (
         <div className="signal-detail">
           <div><b>なぜ重要か</b><p>{article.whyItMatters}</p></div>
-          <div><b>{audience === 'business' ? '導入する側の視点' : 'FDEを目指す視点'}</b><p>{audience === 'business' ? article.businessImpact : article.careerImpact}</p></div>
+          <div><b>{audience === 'business' ? '顧客・事業への影響' : 'エンジニアリングへの影響'}</b><p>{audience === 'business' ? article.customerImpact : article.engineeringImpact}</p></div>
           <a href={article.url} target="_blank" rel="noreferrer">出典を読む <Icon name="external" size={15} /></a>
         </div>
       )}
@@ -136,7 +150,7 @@ export default function RadarApp() {
   const [overview, setOverview] = useState<Overview>({});
   const [audience, setAudience] = useState<Audience>('business');
   const [region, setRegion] = useState<Region | 'ALL'>('ALL');
-  const [signalType, setSignalType] = useState('すべて');
+  const [pillar, setPillar] = useState('すべて');
   const [query, setQuery] = useState('');
   const [selectedId, setSelectedId] = useState('');
   const [savedIds, setSavedIds] = useState<string[]>([]);
@@ -175,11 +189,11 @@ export default function RadarApp() {
     const needle = query.trim().toLowerCase();
     return articles.filter((article) => {
       const regionMatch = region === 'ALL' || article.region === region;
-      const typeMatch = signalType === 'すべて' || article.signalType === signalType;
-      const text = `${article.title} ${article.summary} ${article.source} ${article.location} ${article.sector}`.toLowerCase();
+      const typeMatch = pillar === 'すべて' || article.pillar === pillar;
+      const text = `${article.title} ${article.summary} ${article.source} ${article.location} ${article.sector} ${article.pillar} ${article.subtopic}`.toLowerCase();
       return regionMatch && typeMatch && (!needle || text.includes(needle));
     });
-  }, [articles, query, region, signalType]);
+  }, [articles, query, region, pillar]);
 
   const audienceCopy = audience === 'business'
     ? { label: '企業で導入する', title: 'PoCで終わらせず、業務で使われるところまで。', body: '導入事例、評価、安全、運用をつなげて、次の意思決定に使える形で読み解きます。' }
@@ -211,8 +225,8 @@ export default function RadarApp() {
             <div className="radar-visual"><span className="orbit orbit-one" /><span className="orbit orbit-two" /><span className="orbit orbit-three" /><span className="sweep" /><i className="ping ping-one" /><i className="ping ping-two" /><i className="ping ping-three" /><b>FDE</b></div>
             <div className="radar-stats">
               <div><strong>{overview.counts?.total ?? articles.length}</strong><span>公開シグナル</span></div>
-              <div><strong>{overview.counts?.japan ?? articles.filter((item) => item.region === 'JP').length}</strong><span>日本関連</span></div>
-              <div><strong>{overview.sources?.length ?? 9}</strong><span>監視ソース</span></div>
+              <div><strong>{overview.counts?.japan ?? articles.filter((item) => item.region === 'Japan').length}</strong><span>日本関連</span></div>
+              <div><strong>{overview.sources?.length ?? 35}</strong><span>監視ソース</span></div>
             </div>
             <p><Icon name="refresh" size={15} /> 最終収集 {formatStamp(overview.last_ingested_at)}</p>
           </div>
@@ -221,7 +235,7 @@ export default function RadarApp() {
         <section className="definition" id="about">
           <div><span className="section-no">01</span><span className="eyebrow">WHAT IS AN AI FDE?</span></div>
           <div className="definition-copy"><h2>技術を渡して終わらない。<br />顧客と一緒に、使われる仕組みをつくる。</h2><p>AI FDEは、顧客の課題を見つけ、データと業務を理解し、AIシステムを実装・評価して、本番導入と定着まで責任を持つ役割です。</p></div>
-          <ol className="delivery-flow"><li><b>01</b><span>課題発見</span><small>DISCOVERY</small></li><li><b>02</b><span>試作</span><small>PROTOTYPE</small></li><li><b>03</b><span>評価</span><small>EVALUATION</small></li><li><b>04</b><span>本番化</span><small>PRODUCTION</small></li><li><b>05</b><span>定着・改善</span><small>ADOPTION</small></li></ol>
+          <ol className="delivery-flow"><li><b>01</b><span>顧客課題</span><small>CUSTOMER</small></li><li><b>02</b><span>構築</span><small>BUILD</small></li><li><b>03</b><span>本番導入</span><small>DEPLOY</small></li><li><b>04</b><span>安全・評価</span><small>GOVERN</small></li><li><b>05</b><span>定着・成果</span><small>ADOPTION</small></li><li><b>06</b><span>現場から還元</span><small>FIELD FEEDBACK</small></li></ol>
         </section>
 
         <section className="viewpoint">
@@ -232,16 +246,16 @@ export default function RadarApp() {
         <section className="signals" id="signals">
           <div className="section-head"><div><span className="section-no">03</span><span className="eyebrow">FIELD SIGNALS</span><h2>現場のシグナル</h2></div><p>公式情報と日本の現場共有だけを、<br />FDE関連度で選別しています。</p></div>
           <div className="filters">
-            <div className="region-switch"><button className={region === 'ALL' ? 'selected' : ''} onClick={() => setRegion('ALL')}>すべて</button><button className={region === 'JP' ? 'selected' : ''} onClick={() => setRegion('JP')}>日本</button><button className={region === 'APAC' ? 'selected' : ''} onClick={() => setRegion('APAC')}>APAC</button><button className={region === 'GLOBAL' ? 'selected' : ''} onClick={() => setRegion('GLOBAL')}>世界</button></div>
+            <div className="region-switch"><button className={region === 'ALL' ? 'selected' : ''} onClick={() => setRegion('ALL')}>すべて</button><button className={region === 'Japan' ? 'selected' : ''} onClick={() => setRegion('Japan')}>日本</button><button className={region === 'Global' ? 'selected' : ''} onClick={() => setRegion('Global')}>世界</button></div>
             <label className="search-field"><Icon name="search" size={17} /><span className="sr-only">検索</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="企業・地域・テーマで検索" /></label>
           </div>
-          <div className="type-switch">{signalTypes.map((item) => <button key={item} className={signalType === item ? 'selected' : ''} onClick={() => setSignalType(item)}>{item}</button>)}</div>
+          <div className="type-switch">{pillars.map((item) => <button key={item} className={pillar === item ? 'selected' : ''} onClick={() => setPillar(item)}>{pillarLabels[item]}</button>)}</div>
           <div className="signal-layout">
             <aside><span>{audienceCopy.label}</span><p>記事を開くと、この視点に合わせた読みどころを確認できます。</p><div><small>保存済み</small><strong>{String(savedIds.length).padStart(2, '0')}</strong></div></aside>
             <div className="signal-list">
               {loading && <div className="state"><Icon name="refresh" /> 公式ソースからシグナルを読み込んでいます。</div>}
               {!loading && error && <div className="state is-error"><b>現在データを取得できません。</b><span>{error}</span></div>}
-              {!loading && !error && filtered.length === 0 && <div className="state"><b>条件に合うシグナルはまだありません。</b><span>定期収集後に自動で追加されます。条件を変えて確認してください。</span><button onClick={() => { setQuery(''); setRegion('ALL'); setSignalType('すべて'); }}>絞り込みを解除</button></div>}
+              {!loading && !error && filtered.length === 0 && <div className="state"><b>条件に合うシグナルはまだありません。</b><span>定期収集後に自動で追加されます。条件を変えて確認してください。</span><button onClick={() => { setQuery(''); setRegion('ALL'); setPillar('すべて'); }}>絞り込みを解除</button></div>}
               {(showAll ? filtered : filtered.slice(0, 6)).map((article) => <ArticleRow key={article.id} article={article} audience={audience} open={selectedId === article.id} saved={savedIds.includes(article.id)} onOpen={() => setSelectedId(selectedId === article.id ? '' : article.id)} onSave={() => toggleSaved(article.id)} />)}
               {filtered.length > 6 && <button className="more-button" onClick={() => setShowAll(!showAll)}>{showAll ? '表示を戻す' : `残り${filtered.length - 6}件を見る`} <Icon name="arrow" size={16} /></button>}
             </div>
@@ -249,11 +263,13 @@ export default function RadarApp() {
         </section>
 
         <section className="sources" id="sources">
-          <div className="sources-intro"><span className="section-no">04</span><span className="eyebrow">SOURCE POLICY</span><h2>どこを、なぜ見ているか。</h2><p>一次情報を軸に、日本の求人・共有・ニュースを補助線として重ねます。全文転載はせず、短い要約と出典リンクだけを掲載します。</p></div>
+          <div className="sources-intro"><span className="section-no">04</span><span className="eyebrow">SOURCE POLICY</span><h2>仕事の閉ループを、情報源でつなぐ。</h2><p>顧客課題、構築、本番導入、安全・評価、組織、現場フィードバックを別々に追います。全文転載はせず、短い要約と出典リンクだけを掲載します。</p></div>
           <div className="source-groups">
-            <div><span>01 / PRIMARY</span><h3>AI企業の公式発表・採用</h3><p>OpenAI、Anthropic、Scale AI、Palantir</p></div>
-            <div><span>02 / JAPAN FIELD</span><h3>日本の求人・現場共有</h3><p>AI Native、TokyoDev、Qiita、Zenn</p></div>
-            <div><span>03 / DISCOVERY</span><h3>日本のニュース発見</h3><p>Yahoo!ニュース IT。原典が確認できる手がかりとして利用</p></div>
+            <div><span>01 / PRIMARY</span><h3>AI企業の公式情報</h3><p>OpenAI、Anthropic、Google、Microsoft、AWS、Cloudflare、Palantir</p></div>
+            <div><span>02 / JAPAN</span><h3>日本の制度と企業現場</h3><p>デジタル庁、IPA、専門メディア、企業技術ブログ、求人・コミュニティ</p></div>
+            <div><span>03 / RESEARCH</span><h3>実装に近い研究</h3><p>Agent、RAG、評価、セキュリティ、信頼性に限定した arXiv</p></div>
+            <div><span>04 / REPORTS</span><h3>組織・ROI・市場</h3><p>AI Indexと企業導入レポート。「なぜFDEが見るか」を付加</p></div>
+            <div><span>05 / VIDEO</span><h3>公式動画チャンネル</h3><p>記事になる前の発表、事例、カンファレンスセッションを収集</p></div>
           </div>
           <div className="source-health">{(overview.sources ?? []).map((source) => <a key={source.id} href={source.homepage} target="_blank" rel="noreferrer"><span className={source.consecutive_failures ? 'health-bad' : 'health-ok'}><Icon name="check" size={13} /></span><b>{source.name}</b><small>{source.last_success_at ? `${formatStamp(source.last_success_at)} 確認` : '収集待ち'}</small></a>)}</div>
         </section>

@@ -1,6 +1,6 @@
 # FDE RADAR
 
-**AI Forward Deployed Engineer / Engineering** の採用、企業導入、本番運用、評価、安全・ガバナンスを定期収集する公開型の日本語リファレンスです。
+**AI Forward Deployed Engineer / Engineering** の仕事を、`Customer → Build → Deploy → Govern → Organization → Japan` の閉ループで追う公開型の日本語リファレンスです。
 
 対象はエンジニアだけではありません。AIを導入する企業、FDEという役割を知りたい人、キャリアを検討する人が、一次情報を起点に「現場で何が変わるか」を理解できることを目指します。
 
@@ -17,7 +17,7 @@
 
 ## 実装済みの取得フロー
 
-Cron は Source Registry を読み、Source ID の配列を Queue に送ります。Consumer は各 Source に設定された公開面を使い、次の優先順位で取得します。
+Cron は 6 時間ごとに Source Registry を読み、取得期限を迎えた Source を **1 Source = 1 Queue message** で送ります。ひとつの取得失敗で全体を止めません。Consumer は各 Source に設定された公開面を使い、次の優先順位で取得します。
 
 ```text
 API → RSS / Atom → 静的 HTML（HTMLRewriter）
@@ -25,16 +25,25 @@ API → RSS / Atom → 静的 HTML（HTMLRewriter）
 
 取得済みの Source では `ETag` と `Last-Modified` を再送し、`304` は再保存しません。`429` は `Retry-After` を尊重し、指数バックオフと `backoff_until` を D1 に記録します。`403 / 401 / CAPTCHA / ログイン壁` を迂回せず、明示された次の取得面だけに降格します。
 
-タイトルに AI と書かれているだけでは公開しません。顧客、導入、本番化、評価、運用、採用役割などの複合条件から FDE 関連度を採点し、基準未満の一般 AI ニュースや一般開発記事を除外します。
+タイトルに AI と書かれているだけでは公開しません。顧客、導入、本番化、評価、運用、採用役割などの複合条件から `fde_score`（0〜100）を計算し、Source ごとの基準未満の一般 AI ニュースや一般開発記事を除外します。取得のたびに Source 単位の公開スナップショットを更新し、判定基準から外れた古い項目は公開一覧から退避します。
+
+各項目には Pillar、Subtopic、Content Type、Region、日中要約、`why_it_matters`、顧客影響、実装影響、原典 URL を保存します。タイトルや要約が変わったときは `article_versions` に変更履歴を残します。公開 API は Japan / Global を交互に返し、初期画面が片方だけに偏らないようにしています。
 
 各成功・失敗は `fetch_runs` と `sources` に記録されます。正規化 URL の SHA-256、記事 URL の UNIQUE 制約、D1 FTS5 の日本語分かち書きで重複と検索を処理します。許可された構造化データだけを PostgreSQL の `fde.source_archives` に保存します。Hyperdrive が未接続のローカル環境では、R2 binding がある場合だけ R2 に fallback します。
 
 ## 監視する情報源
 
-- 上流一次情報: OpenAI News、Anthropic Careers、Scale AI Careers、Palantir Blog
-- 日本の求人: AI Native Careers、TokyoDev
-- 日本の現場共有: Qiita API、Zenn RSS
-- 日本のニュース発見: Yahoo!ニュース IT RSS
+Source Registry は 35 件（うち取得可能な 34 件を自動実行）です。
+
+- 上流一次情報: OpenAI News / Platform Changelog、Anthropic、Palantir
+- 実装・クラウド: Google Cloud、Microsoft Azure、GitHub、AWS、Cloudflare
+- 日本の行政・安全: デジタル庁、IPA
+- 日本の企業・技術メディア: Publickey、ITmedia AI+、CodeZine、EnterpriseZine、DevelopersIO、LY、CyberAgent
+- 日本の現場共有・求人: Qiita、Zenn、AI Native Careers、TokyoDev、Yahoo!ニュース IT
+- 研究・レポート: FDE 隣接テーマに限定した arXiv、Stanford AI Index
+- 動画: OpenAI、Anthropic、Google Cloud、AWS、Cloudflare、Palantir の公式 YouTube Feed
+
+OpenAI の東京 FDE 公式ページは Source Directory に保持していますが、Cloudflare Workers から 403 になるため自動取得を停止しています。アクセス制限は迂回しません。
 
 Yahoo!ニュースは発見用の二次情報として区別します。記事本文は転載せず、メタデータ、短い要約、出典リンクのみを公開します。
 
