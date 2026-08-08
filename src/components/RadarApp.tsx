@@ -19,6 +19,52 @@ function formatDate(): string {
   return new Intl.DateTimeFormat('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' }).format(new Date('2026-08-09T09:00:00+09:00'));
 }
 
+type ApiArticle = {
+  id?: string;
+  title?: string;
+  source_name?: string;
+  summary?: string;
+  topic?: string;
+  country_relevance?: string;
+  published_at?: string;
+  canonical_url?: string;
+  tags?: string;
+};
+
+function relativeTime(value?: string): string {
+  if (!value) return '新着';
+  const elapsed = Math.max(0, Date.now() - new Date(value).getTime());
+  const minutes = Math.floor(elapsed / 60_000);
+  if (minutes < 60) return `${Math.max(1, minutes)}分前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}時間前`;
+  return `${Math.floor(hours / 24)}日前`;
+}
+
+function fromApiArticle(raw: ApiArticle): Article | null {
+  if (!raw.id || !raw.title) return null;
+  const topic = raw.topic || 'Webの変化';
+  const source = raw.source_name || '公開情報源';
+  const summary = raw.summary || `${source} からの更新です。`;
+  return {
+    id: raw.id,
+    title: raw.title,
+    source,
+    sourceType: raw.country_relevance === 'JP' ? '日本の情報源' : '海外の情報源',
+    region: raw.country_relevance === 'JP' ? 'JP' : 'GLOBAL',
+    topic,
+    time: relativeTime(raw.published_at),
+    date: raw.published_at ? new Intl.DateTimeFormat('ja-JP', { year: 'numeric', month: 'long', day: 'numeric' }).format(new Date(raw.published_at)) : '新着',
+    readingTime: '3分',
+    summary,
+    whyItMatters: '技術やサービスの変化は、つくる人だけでなく、使う人や組織の選択にも少しずつ影響します。',
+    companyView: 'サービス、働き方、採用や運用を考えるときの具体的な観察材料になります。',
+    personalView: '毎日のサービスや自分の学び方がどう変わるのかを知る入口になります。',
+    url: raw.canonical_url || '#',
+    importance: topic === '仕事への影響' || topic === '暮らしとサービス' ? 'high' : 'normal'
+  };
+}
+
 function ArticleRow({ article, selected, saved, audience, onSelect, onSave }: { article: Article; selected: boolean; saved: boolean; audience: Audience; onSelect: () => void; onSave: () => void }) {
   return (
     <article className={`article-row ${selected ? 'is-selected' : ''}`}>
@@ -67,6 +113,22 @@ export default function RadarApp() {
   const [selectedId, setSelectedId] = useState('router-migration');
   const [savedIds, setSavedIds] = useState<string[]>([]);
   const [showAll, setShowAll] = useState(false);
+  const [liveArticles, setLiveArticles] = useState<Article[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/articles?limit=50')
+      .then((response) => response.ok ? response.json() as Promise<{ articles?: ApiArticle[] }> : Promise.reject(new Error('API unavailable')))
+      .then((payload) => {
+        if (cancelled) return;
+        const next = (payload.articles ?? []).map(fromApiArticle).filter((article): article is Article => Boolean(article));
+        if (next.length) setLiveArticles(next);
+      })
+      .catch(() => {
+        // Astro dev serves the curated local sample until the Worker API is running.
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     try {
@@ -79,7 +141,8 @@ export default function RadarApp() {
 
   const filteredArticles = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
-    return articles.filter((article) => {
+    const availableArticles = liveArticles.length ? liveArticles : articles;
+    return availableArticles.filter((article) => {
       const matchesRegion = region === 'ALL' || article.region === region;
       const matchesTopic = topic === 'すべて' || article.topic === topic;
       const searchable = `${article.title} ${article.source} ${article.summary} ${article.topic}`.toLowerCase();

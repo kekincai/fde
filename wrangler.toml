@@ -11,16 +11,21 @@ not_found_handling = "single-page-application"
 [[d1_databases]]
 binding = "DB"
 database_name = "fde-radar"
-database_id = "00000000000000000000000000000000"
+database_id = "17fda701-71ee-419e-a5a0-12aab2879984"
 migrations_dir = "migrations"
 
-[[r2_buckets]]
-binding = "ARCHIVE"
-bucket_name = "fde-radar-archive"
+[[hyperdrive]]
+binding = "HYPERDRIVE"
+id = "35c833b89d0f412f8144c66ef749cad4"
+
+# Enable R2 in the Cloudflare Dashboard, create this bucket, then uncomment.
+# [[r2_buckets]]
+# binding = "ARCHIVE"
+# bucket_name = "fde-radar-archive"
 
 [[kv_namespaces]]
 binding = "CACHE"
-id = "00000000000000000000000000000000"
+id = "b1ae67d6729f46f48e18628203226f7b"
 
 [[queues.producers]]
 binding = "INGEST_QUEUE"

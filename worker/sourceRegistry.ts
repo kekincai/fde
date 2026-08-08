@@ -9,6 +9,10 @@ export type SourceRecord = {
   country: 'JP' | 'GLOBAL';
   priority: number;
   pollIntervalMinutes: number;
+  etag?: string;
+  lastModified?: string;
+  consecutiveFailures?: number;
+  backoffUntil?: string;
 };
 
 export const sourceRegistry: SourceRecord[] = [
