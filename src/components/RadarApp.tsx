@@ -208,7 +208,7 @@ export default function RadarApp() {
   return (
     <div className="site-shell">
       <header className="site-header">
-        <a className="brand" href="#top"><span className="brand-mark">F</span><span>AI FDE <em>RADAR</em></span></a>
+        <a className="brand" href="#top"><img className="brand-mark" src="/icon-192.png" alt="" /><span>AI FDE <em>RADAR</em></span></a>
         <nav aria-label="メインナビゲーション"><a href="#about">FDEとは</a><a href="#signals">シグナル</a><a href="#sources">情報源</a></nav>
         <div className="header-status"><span className="live-dot" />自動収集中 <b>{formatToday()}</b></div>
       </header>
@@ -221,8 +221,16 @@ export default function RadarApp() {
             <p>世界と日本の公式情報から、AI FDEの採用、導入、本番運用、評価、安全の動きを定期収集する日本語リファレンスです。</p>
             <div className="hero-actions"><a className="primary-action" href="#signals">最新シグナルを見る <Icon name="arrow" /></a><a href="#about">まずFDEを知る</a></div>
           </div>
-          <div className="radar-panel" aria-label="収集状況">
-            <div className="radar-visual"><span className="orbit orbit-one" /><span className="orbit orbit-two" /><span className="orbit orbit-three" /><span className="sweep" /><i className="ping ping-one" /><i className="ping ping-two" /><i className="ping ping-three" /><b>FDE</b></div>
+          <div className="radar-panel" aria-label="FDEの仕事の循環と収集状況">
+            <div className="field-map">
+              <div className="field-map-head"><span>LIVE FIELD LOOP</span><b>JP / GLOBAL</b></div>
+              <img src="/ai-fde-mark-512.png" alt="顧客課題から現場への導入、知見の還元までを表すAI FDEアイコン" />
+              <span className="map-label map-customer">CUSTOMER</span>
+              <span className="map-label map-build">BUILD</span>
+              <span className="map-label map-deploy">DEPLOY</span>
+              <span className="map-label map-govern">GOVERN</span>
+              <div className="field-map-note"><b>技術能力</b><span>現場の成果</span></div>
+            </div>
             <div className="radar-stats">
               <div><strong>{overview.counts?.total ?? articles.length}</strong><span>公開シグナル</span></div>
               <div><strong>{overview.counts?.japan ?? articles.filter((item) => item.region === 'Japan').length}</strong><span>日本関連</span></div>
@@ -275,7 +283,7 @@ export default function RadarApp() {
         </section>
       </main>
 
-      <footer><div><b>AI FDE RADAR</b><span>AIを、現場の成果まで。</span></div><div><span>6時間ごとに自動収集</span><a href="https://github.com/kekincai/fde" target="_blank" rel="noreferrer">公開コード <Icon name="external" size={13} /></a></div></footer>
+      <footer><div><img src="/icon-192.png" alt="" /><b>AI FDE RADAR</b><span>AIを、現場の成果まで。</span></div><div><span>6時間ごとに自動収集</span><a href="https://github.com/kekincai/fde" target="_blank" rel="noreferrer">公開コード <Icon name="external" size={13} /></a></div></footer>
     </div>
   );
 }
