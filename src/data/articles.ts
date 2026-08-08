@@ -15,9 +15,9 @@ export type Article = {
   time: string;
   date: string;
   summary: string;
-  whyItMatters: string;
-  customerImpact: string;
-  engineeringImpact: string;
+  relevanceTags: string[];
+  businessImpactTags: string[];
+  engineeringImpactTags: string[];
   url: string;
   score: number;
 };

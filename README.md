@@ -27,7 +27,7 @@ API → RSS / Atom → 静的 HTML（HTMLRewriter）
 
 タイトルに AI と書かれているだけでは公開しません。顧客、導入、本番化、評価、運用、採用役割などの複合条件から `fde_score`（0〜100）を計算し、Source ごとの基準未満の一般 AI ニュースや一般開発記事を除外します。取得のたびに Source 単位の公開スナップショットを更新し、判定基準から外れた古い項目は公開一覧から退避します。
 
-各項目には Pillar、Subtopic、Content Type、Region、日中要約、`why_it_matters`、顧客影響、実装影響、原典 URL を保存します。タイトルや要約が変わったときは `article_versions` に変更履歴を残します。公開 API は Japan / Global を交互に返し、初期画面が片方だけに偏らないようにしています。
+各項目には Pillar、Subtopic、Content Type、Region、日中要約、本文から判定した FDE 接点・事業影響・実装影響タグ、原典 URL を保存します。影響を説明する定型文は生成しません。タイトルや要約が変わったときは `article_versions` に変更履歴を残します。公開 API は Japan / Global を交互に返し、初期画面が片方だけに偏らないようにしています。
 
 各成功・失敗は `fetch_runs` と `sources` に記録されます。正規化 URL の SHA-256、記事 URL の UNIQUE 制約、D1 FTS5 の日本語分かち書きで重複と検索を処理します。許可された構造化データだけを PostgreSQL の `fde.source_archives` に保存します。Hyperdrive が未接続のローカル環境では、R2 binding がある場合だけ R2 に fallback します。
 

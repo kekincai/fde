@@ -32,12 +32,10 @@ type ApiArticle = {
   location?: string;
   sector?: string;
   fde_score?: number;
-  why_it_matters?: string;
-  company_impact?: string;
-  career_impact?: string;
+  relevance_tags?: string;
+  business_impact_tags?: string;
+  engineering_impact_tags?: string;
   summary_ja?: string;
-  customer_impact?: string;
-  engineering_impact?: string;
 };
 
 type SourceStatus = {
@@ -74,6 +72,20 @@ function relativeTime(value?: string): string {
   return `${Math.floor(hours / 24)}日前`;
 }
 
+function parseTags(value: string | undefined, fallback: string): string[] {
+  if (!value) return fallback ? [fallback] : [];
+  try {
+    const tags = JSON.parse(value);
+    if (Array.isArray(tags)) {
+      const clean = tags.filter((tag): tag is string => typeof tag === 'string' && tag.trim().length > 0);
+      if (clean.length) return clean.slice(0, 3);
+    }
+  } catch {
+    // Older API records may not have tag JSON yet.
+  }
+  return fallback ? [fallback] : [];
+}
+
 function fromApi(raw: ApiArticle): Article | null {
   if (!raw.id || !raw.title || !raw.canonical_url) return null;
   const region: Region = raw.region === 'Japan' || raw.country_relevance === 'JP' ? 'Japan' : 'Global';
@@ -91,9 +103,9 @@ function fromApi(raw: ApiArticle): Article | null {
     time: relativeTime(raw.published_at),
     date: raw.published_at ? new Intl.DateTimeFormat('ja-JP', { year: 'numeric', month: 'long', day: 'numeric' }).format(new Date(raw.published_at)) : '公開日不明',
     summary: raw.summary_ja || raw.summary || '公式情報源で公開されたAI導入に関する更新です。',
-    whyItMatters: raw.why_it_matters || 'AIを実験から本番へ移す現場の変化を知る一次情報です。',
-    customerImpact: raw.customer_impact || raw.company_impact || '自社の導入計画を考えるための参考になります。',
-    engineeringImpact: raw.engineering_impact || raw.career_impact || 'FDEに必要な実装・評価・運用条件を知る参考になります。',
+    relevanceTags: parseTags(raw.relevance_tags, raw.pillar || 'FDE'),
+    businessImpactTags: parseTags(raw.business_impact_tags, ''),
+    engineeringImpactTags: parseTags(raw.engineering_impact_tags, ''),
     url: raw.canonical_url,
     score: Number(raw.fde_score ?? 4)
   };
@@ -136,8 +148,10 @@ function ArticleRow({ article, audience, open, saved, onOpen, onSave }: {
       <button className={`save-button ${saved ? 'is-saved' : ''}`} type="button" onClick={onSave} aria-label={saved ? '保存を解除' : '保存する'} aria-pressed={saved}><Icon name="bookmark" /></button>
       {open && (
         <div className="signal-detail">
-          <div><b>なぜ重要か</b><p>{article.whyItMatters}</p></div>
-          <div><b>{audience === 'business' ? '顧客・事業への影響' : 'エンジニアリングへの影響'}</b><p>{audience === 'business' ? article.customerImpact : article.engineeringImpact}</p></div>
+          <div><b>FDEとの接点</b><div className="impact-tags">{article.relevanceTags.map((tag) => <span key={tag}>{tag}</span>)}</div></div>
+          {(audience === 'business' ? article.businessImpactTags : article.engineeringImpactTags).length > 0 && (
+            <div><b>{audience === 'business' ? '顧客・事業への影響' : '実装・運用への影響'}</b><div className="impact-tags">{(audience === 'business' ? article.businessImpactTags : article.engineeringImpactTags).map((tag) => <span key={tag}>{tag}</span>)}</div></div>
+          )}
           <a href={article.url} target="_blank" rel="noreferrer">出典を読む <Icon name="external" size={15} /></a>
         </div>
       )}

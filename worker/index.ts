@@ -590,15 +590,22 @@ async function ingestSource(env: Env, source: SourceRecord, options: IngestOptio
       const titleNormalized = item.title.normalize('NFKC').toLowerCase();
       const contentHash = await sha256(`${item.title}\n${item.summary}\n${item.tags.join(' ')}`);
       const searchTokensJa = tokenizeJapanese(`${item.title} ${item.summary} ${item.summaryJa} ${item.tags.join(' ')} ${item.location} ${item.sector} ${item.pillar} ${item.subtopic}`);
-      const impacts = impactCopyV2(item.pillar ?? source.defaultPillar, item.subtopic ?? '');
+      const impacts = inferImpactTags(source, item);
       const stored = await env.DB.prepare(
         `INSERT INTO articles
         (id, canonical_url, canonical_url_hash, external_item_id, source_id, title, title_normalized,
          summary, language, country_relevance, topic, tags, search_tokens_ja, published_at,
          japan_score, quality_score, trend_score, signal_type, location, sector, fde_score,
          why_it_matters, company_impact, career_impact, pillar, subtopic, content_type, region,
-         summary_ja, summary_zh, customer_impact, engineering_impact, content_hash, status, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'published', CURRENT_TIMESTAMP)
+         summary_ja, summary_zh, customer_impact, engineering_impact,
+         relevance_tags, business_impact_tags, engineering_impact_tags,
+         content_hash, status, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, 'published', CURRENT_TIMESTAMP)
         ON CONFLICT(canonical_url) DO UPDATE SET
           external_item_id = excluded.external_item_id,
           source_id = excluded.source_id,
@@ -629,6 +636,9 @@ async function ingestSource(env: Env, source: SourceRecord, options: IngestOptio
           summary_zh = excluded.summary_zh,
           customer_impact = excluded.customer_impact,
           engineering_impact = excluded.engineering_impact,
+          relevance_tags = excluded.relevance_tags,
+          business_impact_tags = excluded.business_impact_tags,
+          engineering_impact_tags = excluded.engineering_impact_tags,
           content_hash = excluded.content_hash,
           status = 'published',
           updated_at = CURRENT_TIMESTAMP
@@ -638,10 +648,11 @@ async function ingestSource(env: Env, source: SourceRecord, options: IngestOptio
         item.summary, source.language, item.countryRelevance, item.signalType, item.tags.join(' '),
         searchTokensJa, item.publishedAt, item.countryRelevance === 'JP' ? 1 : item.countryRelevance === 'APAC' ? 0.75 : 0.45,
         source.weight / 100, item.fdeScore / 100, item.signalType, item.location, item.sector,
-        item.fdeScore, impacts.why, impacts.customer, impacts.engineering,
+        item.fdeScore, '', '', '',
         item.pillar ?? source.defaultPillar, item.subtopic ?? '', item.contentType ?? source.contentType,
         item.countryRelevance === 'JP' ? 'Japan' : 'Global', item.summaryJa ?? '', item.summaryZh ?? '',
-        impacts.customer, impacts.engineering, contentHash
+        '', '', JSON.stringify(impacts.relevance), JSON.stringify(impacts.business),
+        JSON.stringify(impacts.engineering), contentHash
       ).first<{ id: string }>();
       if (stored?.id) {
         await env.DB.prepare('DELETE FROM articles_fts WHERE article_id = ?').bind(stored.id).run();
@@ -841,40 +852,51 @@ function extractKeywords(value: string): string[] {
   return candidates.filter((candidate) => new RegExp(candidate.replace('FDE', 'forward deployed|FDE'), 'i').test(value));
 }
 
-function impactCopyV2(pillar: FdePillar, subtopic: string): { why: string; customer: string; engineering: string } {
-  const copies: Record<FdePillar, { why: string; customer: string; engineering: string }> = {
-    Customer: {
-      why: `顧客課題をAIの機能ではなく業務成果へ変換する際の、${subtopic}に関する一次情報です。`,
-      customer: '対象業務、利用者、成功指標、ROIを先に定義し、PoCを本番採用へつなぐ判断材料になります。',
-      engineering: 'モデル精度だけでなく、業務フローへの組み込み方と測定可能な成果を設計する参考になります。'
-    },
-    Build: {
-      why: `${subtopic}を使って顧客固有の課題を解くための、実装パターンと技術選択を示します。`,
-      customer: '自社データや既存SaaSとの接続範囲、構築コスト、再利用可能性を検討できます。',
-      engineering: 'Agent、RAG、ツール連携をプロトタイプから保守可能な構成へ進めるヒントになります。'
-    },
-    Deploy: {
-      why: `AIをデモではなく安定した本番システムとして動かすための、${subtopic}の変化です。`,
-      customer: '権限、データ境界、運用責任、障害時の対応まで含めた導入計画を見直せます。',
-      engineering: '可観測性、コスト、レイテンシ、認証、データ接続を本番要件として設計する参考になります。'
-    },
-    Govern: {
-      why: `企業AIに必要な${subtopic}を、導入後ではなく設計段階から組み込むための情報です。`,
-      customer: '法務・セキュリティ・業務部門が合意すべき利用条件とリスク境界を整理できます。',
-      engineering: '評価、監査ログ、アクセス制御、プロンプトインジェクション対策などの実装要件につながります。'
-    },
-    Organization: {
-      why: `FDE、AI CoE、変革推進など、AI導入を継続的な組織能力にするための${subtopic}を示します。`,
-      customer: '誰がユースケース選定、技術検証、ライセンス、運用、教育を持つかを設計する材料になります。',
-      engineering: '顧客との発見・実装・評価・フィードバックを一つの責任範囲として捉える参考になります。'
-    },
-    Japan: {
-      why: `日本の制度、企業文化、調達、現場運用を踏まえた${subtopic}のシグナルです。`,
-      customer: '海外事例をそのまま移植せず、日本の組織・規制・意思決定に合わせて導入する判断材料になります。',
-      engineering: '日本語、国内データ、既存システム、セキュリティ審査を含む実装条件を把握できます。'
-    }
+function inferImpactTags(source: SourceRecord, item: DiscoveredItem): {
+  relevance: string[];
+  business: string[];
+  engineering: string[];
+} {
+  const pillar = item.pillar ?? source.defaultPillar;
+  const value = `${item.title} ${item.summary} ${item.tags.join(' ')} ${item.subtopic ?? ''}`;
+  const relevanceByPillar: Record<FdePillar, string> = {
+    Customer: '顧客課題',
+    Build: '実装手法',
+    Deploy: '本番導入',
+    Govern: 'リスク管理',
+    Organization: '組織・人材',
+    Japan: '日本市場'
   };
-  return copies[pillar];
+  const business: string[] = [];
+  const engineering: string[] = [];
+  const add = (target: string[], label: string, pattern: RegExp) => {
+    if (pattern.test(value) && !target.includes(label)) target.push(label);
+  };
+
+  add(business, 'コスト・ROI', /\broi\b|return on investment|cost|cost-saving|費用|コスト|投資対効果/i);
+  add(business, '業務効率', /workflow|automation|productivity|efficien|業務|自動化|生産性|効率/i);
+  add(business, '顧客体験・売上', /customer experience|revenue|sales|conversion|顧客体験|売上|販売/i);
+  add(business, 'リスク低減', /risk|security|privacy|safety|guardrail|リスク|セキュリティ|安全|プライバシー/i);
+  add(business, '規制対応', /regulat|compliance|policy|law|governance|規制|法令|コンプライアンス|ガバナンス/i);
+  add(business, '組織・人材', /career|hiring|talent|organization|change management|採用|人材|組織|教育/i);
+  add(business, '導入判断', /deploy|production|adoption|implementation|導入|本番|実装/i);
+
+  add(engineering, 'RAG・検索', /\brag\b|retrieval|enterprise search|検索/i);
+  add(engineering, 'AIエージェント', /\bagent(?:ic|s)?\b|エージェント/i);
+  add(engineering, '評価・品質', /evaluation|evals?|benchmark|quality|testing|評価|品質|テスト/i);
+  add(engineering, 'セキュリティ', /security|prompt injection|guardrail|attack|セキュリティ|攻撃/i);
+  add(engineering, '本番基盤', /deploy|production|cloud|infrastructure|本番|クラウド|基盤/i);
+  add(engineering, '監視・運用', /observability|monitor|operation|incident|監視|運用|障害/i);
+  add(engineering, '認証・権限', /identity|auth|permission|access control|認証|権限|アクセス制御/i);
+  add(engineering, 'システム連携', /integration|connector|\bmcp\b|api|連携|コネクタ/i);
+  add(engineering, 'データ基盤', /database|data platform|data pipeline|データベース|データ基盤/i);
+  add(engineering, '開発支援', /coding|software engineering|developer|コード|開発/i);
+
+  return {
+    relevance: [relevanceByPillar[pillar], item.subtopic].filter((label): label is string => Boolean(label)).slice(0, 2),
+    business: business.slice(0, 3),
+    engineering: engineering.slice(0, 3)
+  };
 }
 
 async function persistArchive(env: Env, source: SourceRecord, items: DiscoveredItem[], mode: SourceRecord['fetchMode'], fetchedAt: string): Promise<void> {
