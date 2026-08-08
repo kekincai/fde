@@ -8,7 +8,15 @@ import { sourceRegistry, type ContentType, type FdePillar, type SourceKind, type
 
 export type IngestMessage = {
   sourceIds?: string[];
-  reason?: 'scheduled' | 'manual';
+  reason?: 'scheduled' | 'manual' | 'backfill';
+  since?: string;
+  page?: number;
+};
+
+type IngestOptions = {
+  mode: 'scheduled' | 'manual' | 'backfill';
+  since?: string;
+  page?: number;
 };
 
 type Env = {
@@ -187,7 +195,8 @@ app.get('/api/ingest/status', async (c) => {
          FROM sources WHERE allowed_fetch = 1 ORDER BY priority DESC`
       ).all(),
       c.env.DB.prepare(
-        `SELECT source_id, status, discovered_count, unique_count, error_message, started_at, finished_at
+        `SELECT source_id, status, discovered_count, unique_count, error_message, started_at, finished_at,
+                ingest_mode, backfill_page, since_at
          FROM fetch_runs ORDER BY started_at DESC LIMIT 20`
       ).all()
     ]);
@@ -214,6 +223,35 @@ app.post('/api/ingest/dispatch', async (c) => {
   return c.json({ queued: sourceIds.length, sourceIds });
 });
 
+app.post('/api/ingest/backfill', async (c) => {
+  if (!isAuthorized(c.req.raw, c.env)) return c.json({ error: 'Unauthorized' }, 401);
+  await syncSourceRegistry(c.env);
+  const payload = (await c.req.json().catch(() => ({}))) as { since?: string; sourceIds?: string[]; pages?: number[] };
+  const since = normalizeBackfillSince(payload.since);
+  if (!since) return c.json({ error: 'since must be an ISO date on or after 2026-06-01' }, 400);
+  const requested = new Set(payload.sourceIds ?? []);
+  const requestedPages = payload.pages?.filter((page) => Number.isInteger(page) && page > 0);
+  const sources = sourceRegistry.filter((source) =>
+    source.enabled !== false
+    && Boolean(source.backfillPages)
+    && (!requested.size || requested.has(source.id))
+  );
+  const sourcePages = sources.map((source) => ({
+    source,
+    pages: requestedPages?.length
+      ? requestedPages.filter((page) => page <= (source.backfillPages ?? 1))
+      : Array.from({ length: source.backfillPages ?? 1 }, (_, page) => page + 1)
+  }));
+  const messages = sourcePages.flatMap(({ source, pages }) => pages.map((page) => ({
+    body: { sourceIds: [source.id], reason: 'backfill' as const, since, page }
+  })));
+  for (let index = 0; index < messages.length; index += 100) {
+    await c.env.INGEST_QUEUE.sendBatch(messages.slice(index, index + 100));
+  }
+  await c.env.CACHE.put('backfill:last-dispatch', JSON.stringify({ since, queued: messages.length, at: new Date().toISOString() }), { expirationTtl: 604800 });
+  return c.json({ queued: messages.length, since, sources: sourcePages.map(({ source, pages }) => ({ id: source.id, pages })) });
+});
+
 async function readSources(env: Env, sourceIds?: string[], force = false): Promise<SourceRecord[]> {
   const now = new Date().toISOString();
   try {
@@ -231,29 +269,34 @@ async function readSources(env: Env, sourceIds?: string[], force = false): Promi
       : await statement.bind(now, now).all<DbSourceRow>();
     return result.results
       .filter((source) => !sourceIds?.length || sourceIds.includes(source.id))
-      .map((source) => ({
-        id: source.id,
-        name: source.name,
-        homepage: source.homepage,
-        feedUrl: source.feed_url ?? undefined,
-        apiUrl: source.api_url ?? undefined,
-        fetchMode: source.fetch_mode,
-        language: source.language,
-        country: source.country,
-        kind: source.source_kind,
-        contentType: source.content_type,
-        defaultPillar: source.default_pillar,
-        sourceTier: source.source_tier,
-        weight: source.source_weight,
-        minScore: source.min_fde_score,
-        parseMode: sourceRegistry.find((item) => item.id === source.id)?.parseMode,
-        priority: source.priority,
-        pollIntervalMinutes: source.poll_interval_minutes,
-        etag: source.etag ?? undefined,
-        lastModified: source.last_modified ?? undefined,
-        consecutiveFailures: source.consecutive_failures,
-        backoffUntil: source.backoff_until ?? undefined
-      }));
+      .map((source) => {
+        const registrySource = sourceRegistry.find((item) => item.id === source.id);
+        return {
+          id: source.id,
+          name: source.name,
+          homepage: source.homepage,
+          feedUrl: source.feed_url ?? undefined,
+          apiUrl: source.api_url ?? undefined,
+          fetchMode: source.fetch_mode,
+          language: source.language,
+          country: source.country,
+          kind: source.source_kind,
+          contentType: source.content_type,
+          defaultPillar: source.default_pillar,
+          sourceTier: source.source_tier,
+          weight: source.source_weight,
+          minScore: source.min_fde_score,
+          parseMode: registrySource?.parseMode,
+          backfillPages: registrySource?.backfillPages,
+          backfillMode: registrySource?.backfillMode,
+          priority: source.priority,
+          pollIntervalMinutes: source.poll_interval_minutes,
+          etag: source.etag ?? undefined,
+          lastModified: source.last_modified ?? undefined,
+          consecutiveFailures: source.consecutive_failures,
+          backoffUntil: source.backoff_until ?? undefined
+        };
+      });
   } catch {
     return sourceRegistry.filter((source) => source.enabled !== false && (!sourceIds?.length || sourceIds.includes(source.id)));
   }
@@ -287,7 +330,7 @@ async function syncSourceRegistry(env: Env): Promise<void> {
   }
 }
 
-async function fetchSourceItems(source: SourceRecord): Promise<{ items: DiscoveredItem[]; meta: FetchMeta }> {
+async function fetchSourceItems(source: SourceRecord, options: IngestOptions): Promise<{ items: DiscoveredItem[]; meta: FetchMeta }> {
   const candidates = [
     { mode: 'api' as const, url: source.apiUrl },
     { mode: 'rss' as const, url: source.feedUrl },
@@ -296,14 +339,27 @@ async function fetchSourceItems(source: SourceRecord): Promise<{ items: Discover
   let lastError: FetchFailure | undefined;
   for (const candidate of candidates) {
     try {
-      const result = await fetchWithPolicy(source, candidate.url);
+      const requestUrl = options.mode === 'backfill'
+        ? buildBackfillUrl(source, candidate.url, options)
+        : candidate.url;
+      const result = await fetchWithPolicy(source, requestUrl, options.mode === 'backfill');
       if (result.notModified) return { items: [], meta: { ...result, mode: candidate.mode } };
       const discovered = candidate.mode === 'api'
         ? await parseApiResponse(source, result.response)
         : candidate.mode === 'rss'
-          ? await parseRssResponse(source, result.response)
+          ? await parseRssResponse(source, result.response, options.mode === 'backfill' ? 1_500 : 60)
           : await parseHtmlResponse(source, result.response);
-      const items = discovered
+      let window = discovered;
+      if (options.mode === 'backfill') {
+        const sinceTime = Date.parse(options.since ?? '');
+        window = window.filter((item) => Date.parse(item.publishedAt) >= sinceTime);
+        if (source.backfillMode === 'feed-window') {
+          const pageSize = 75;
+          const offset = Math.max(0, ((options.page ?? 1) - 1) * pageSize);
+          window = window.slice(offset, offset + pageSize);
+        }
+      }
+      const items = window
         .map((item) => enrichItem(source, item))
         .filter((item) => item.fdeScore >= source.minScore);
       return { items, meta: { ...result, mode: candidate.mode } };
@@ -314,13 +370,13 @@ async function fetchSourceItems(source: SourceRecord): Promise<{ items: Discover
   throw lastError ?? new Error(`${source.name}: no fetch surface configured`);
 }
 
-async function fetchWithPolicy(source: SourceRecord, url: string): Promise<{ response: Response; etag: string | null; lastModified: string | null; notModified?: boolean }> {
+async function fetchWithPolicy(source: SourceRecord, url: string, unconditional = false): Promise<{ response: Response; etag: string | null; lastModified: string | null; notModified?: boolean }> {
   const headers = new Headers({
     accept: 'application/atom+xml, application/rss+xml, application/xml, text/xml, application/json, text/html',
     'user-agent': USER_AGENT
   });
-  if (source.etag) headers.set('if-none-match', source.etag);
-  if (source.lastModified) headers.set('if-modified-since', source.lastModified);
+  if (!unconditional && source.etag) headers.set('if-none-match', source.etag);
+  if (!unconditional && source.lastModified) headers.set('if-modified-since', source.lastModified);
   const response = await fetch(url, { headers });
   if (response.status === 304) return { response, etag: source.etag ?? null, lastModified: source.lastModified ?? null, notModified: true };
   if (response.status === 429) {
@@ -338,6 +394,24 @@ async function fetchWithPolicy(source: SourceRecord, url: string): Promise<{ res
   const contentLength = Number(response.headers.get('content-length') ?? 0);
   if (contentLength > MAX_BODY_BYTES) throw new Error(`${source.name}: response exceeds ${MAX_BODY_BYTES} bytes`);
   return { response, etag: response.headers.get('etag'), lastModified: response.headers.get('last-modified') };
+}
+
+function buildBackfillUrl(source: SourceRecord, rawUrl: string, options: IngestOptions): string {
+  const url = new URL(rawUrl);
+  const page = Math.max(1, options.page ?? 1);
+  if (source.id === 'qiita-fde') {
+    const sinceDay = (options.since ?? '').slice(0, 10);
+    const baseQuery = url.searchParams.get('query') ?? '';
+    url.searchParams.set('query', `(${baseQuery}) created:>=${sinceDay}`);
+    url.searchParams.set('per_page', '100');
+    url.searchParams.set('page', String(page));
+  } else if (source.id === 'arxiv-fde-research') {
+    url.searchParams.set('start', String((page - 1) * 100));
+    url.searchParams.set('max_results', '100');
+  } else if (source.backfillMode === 'feed-page') {
+    url.searchParams.set('paged', String(page));
+  }
+  return url.toString();
 }
 
 async function parseApiResponse(source: SourceRecord, response: Response): Promise<DiscoveredItem[]> {
@@ -395,12 +469,12 @@ function parseQiitaItem(item: Record<string, unknown>): DiscoveredItem[] {
   }];
 }
 
-async function parseRssResponse(source: SourceRecord, response: Response): Promise<DiscoveredItem[]> {
+async function parseRssResponse(source: SourceRecord, response: Response, maxEntries = 60): Promise<DiscoveredItem[]> {
   const body = (await response.text()).slice(0, MAX_BODY_BYTES);
   const parsed = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_' }).parse(body);
   const entries = parsed.feed?.entry ?? parsed.rss?.channel?.item ?? parsed.channel?.item ?? [];
   const list = Array.isArray(entries) ? entries : [entries];
-  return list.slice(0, 60).flatMap((entry) => {
+  return list.slice(0, maxEntries).flatMap((entry) => {
     const link = readFeedLink(entry?.link, source.homepage);
     const title = cleanText(String(entry?.title ?? ''));
     const rawSummary = cleanText(String(
@@ -452,7 +526,7 @@ async function parseHtmlResponse(source: SourceRecord, response: Response): Prom
           url: current.url,
           title,
           summary: `${source.name}の公式ページで確認された更新です。`,
-          publishedAt: new Date().toISOString(),
+          publishedAt: dateFromTitle(title) ?? new Date().toISOString(),
           tags: compactTags(extractKeywords(title)),
           signalType: source.kind === 'careers' ? '採用・役割' : inferSignalType(title),
           location: inferLocation(title),
@@ -496,12 +570,12 @@ async function parseSingleCareerPage(source: SourceRecord, response: Response): 
   }];
 }
 
-async function ingestSource(env: Env, source: SourceRecord): Promise<{ discovered: number; unique: number }> {
+async function ingestSource(env: Env, source: SourceRecord, options: IngestOptions): Promise<{ discovered: number; unique: number }> {
   const startedAt = new Date().toISOString();
   const runId = crypto.randomUUID();
   try {
-    const result = await fetchSourceItems(source);
-    if (!result.meta.notModified) {
+    const result = await fetchSourceItems(source, options);
+    if (!result.meta.notModified && options.mode !== 'backfill') {
       await env.DB.prepare("UPDATE articles SET status = 'legacy' WHERE source_id = ?").bind(source.id).run();
     }
     let unique = 0;
@@ -585,19 +659,27 @@ async function ingestSource(env: Env, source: SourceRecord): Promise<{ discovere
       }
     }
     await env.DB.prepare(
-      `INSERT INTO fetch_runs (id, source_id, status, discovered_count, unique_count, started_at, finished_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    ).bind(runId, source.id, result.meta.notModified ? 'not_modified' : 'success', result.items.length, unique, startedAt, new Date().toISOString()).run();
-    await markSourceSuccess(env, source, result.meta);
+      `INSERT INTO fetch_runs
+       (id, source_id, status, discovered_count, unique_count, started_at, finished_at, ingest_mode, backfill_page, since_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      runId, source.id, result.meta.notModified ? 'not_modified' : 'success', result.items.length, unique,
+      startedAt, new Date().toISOString(), options.mode, options.page ?? null, options.since ?? null
+    ).run();
+    if (options.mode !== 'backfill') await markSourceSuccess(env, source, result.meta);
     if (!result.meta.notModified) await persistArchive(env, source, result.items, result.meta.mode, startedAt);
     return { discovered: result.items.length, unique };
   } catch (error) {
     const failure = error as FetchFailure;
     await env.DB.prepare(
-      `INSERT INTO fetch_runs (id, source_id, status, error_message, started_at, finished_at)
-       VALUES (?, ?, 'error', ?, ?, ?)`
-    ).bind(runId, source.id, errorMessage(error), startedAt, new Date().toISOString()).run().catch(() => undefined);
-    await markSourceFailure(env, source, failure);
+      `INSERT INTO fetch_runs
+       (id, source_id, status, error_message, started_at, finished_at, ingest_mode, backfill_page, since_at)
+       VALUES (?, ?, 'error', ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      runId, source.id, errorMessage(error), startedAt, new Date().toISOString(),
+      options.mode, options.page ?? null, options.since ?? null
+    ).run().catch(() => undefined);
+    if (options.mode !== 'backfill') await markSourceFailure(env, source, failure);
     throw error;
   }
 }
@@ -843,6 +925,14 @@ function isAuthorized(request: Request, env: Env): boolean {
   return request.headers.get('authorization') === `Bearer ${env.INGEST_TOKEN}`;
 }
 
+function normalizeBackfillSince(value?: string): string | undefined {
+  const raw = value?.trim() || '2026-06-01';
+  const timestamp = Date.parse(`${raw.slice(0, 10)}T00:00:00+09:00`);
+  const minimum = Date.parse('2026-06-01T00:00:00+09:00');
+  if (!Number.isFinite(timestamp) || timestamp < minimum || timestamp > Date.now()) return undefined;
+  return new Date(timestamp).toISOString();
+}
+
 function readFeedLink(rawLink: unknown, baseUrl: string): string | undefined {
   for (const link of Array.isArray(rawLink) ? rawLink : [rawLink]) {
     const value = typeof link === 'string' ? link : (link as Record<string, unknown> | undefined)?.['@_href'] ?? (link as Record<string, unknown> | undefined)?.href;
@@ -875,6 +965,13 @@ function parseRetryAfter(value: string | null): number | undefined {
 function safeIsoDate(value: string): string {
   const timestamp = Date.parse(value);
   return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : new Date().toISOString();
+}
+
+function dateFromTitle(value: string): string | undefined {
+  const match = value.match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+20\d{2}\b/i);
+  if (!match) return undefined;
+  const timestamp = Date.parse(match[0]);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : undefined;
 }
 
 function cleanText(value: string): string {
@@ -927,10 +1024,13 @@ const worker = {
   },
   async queue(batch: MessageBatch<IngestMessage>, env: Env) {
     for (const message of batch.messages) {
-      const sources = await readSources(env, message.body.sourceIds, message.body.reason === 'manual');
+      const mode = message.body.reason ?? 'scheduled';
+      const sources = await readSources(env, message.body.sourceIds, mode !== 'scheduled');
       const failures: string[] = [];
       for (const source of sources) {
-        try { await ingestSource(env, source); }
+        try {
+          await ingestSource(env, source, { mode, since: message.body.since, page: message.body.page });
+        }
         catch (error) { failures.push(`${source.id}: ${errorMessage(error)}`); }
       }
       if (failures.length) {

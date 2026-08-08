@@ -49,6 +49,12 @@ Yahoo!ニュースは発見用の二次情報として区別します。記事�
 
 本番の手動確認用 API は `POST /api/ingest/dispatch`、状態確認用 API は `GET /api/ingest/status` です。`INGEST_TOKEN` secret を設定した場合、dispatch は `Authorization: Bearer <token>` が必要です。
 
+## 履歴データの初期投入
+
+`POST /api/ingest/backfill` は、指定日以降の公開履歴を Source ごとの Queue message に分割して投入します。2026年6月以降を初期データにする例は `{"since":"2026-06-01"}` です。途中から再開するときは `sourceIds` と `pages` で Source とページを限定できます。再実行しても URL の一意制約で重複しません。通常巡回の公開スナップショットを退避しないため、履歴投入中に古い記事が消えることもありません。
+
+ここでいう履歴の範囲は「各 Source が公式 RSS、公開 API、または公開ページで提供している範囲」です。Qiita と arXiv は API pagination、CyberAgent は Feed pagination、OpenAI News は全履歴 Feed を日付で区切って処理します。直近20件などに限定された Feed は、その公開窓を超える記事を完全取得したとは扱いません。取得結果は `fetch_runs` の `ingest_mode`、`backfill_page`、`since_at` で監査できます。
+
 ## ローカルで動かす
 
 ```bash
