@@ -39,13 +39,15 @@ button { border: 0; color: inherit; cursor: pointer; }
 .header-search kbd { min-width: 19px; padding: 2px 5px; border: 1px solid var(--line); border-radius: 3px; color: var(--muted); font-size: 10px; text-align: center; }
 
 main { width: min(var(--max), calc(100% - 80px)); margin: 0 auto; }
-.hero-section { min-height: 545px; display: grid; grid-template-columns: minmax(0, .95fr) minmax(450px, 1.05fr); align-items: center; gap: 100px; padding: 76px 0 92px; }
+.hero-section { min-height: 545px; display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(450px, .95fr); align-items: center; gap: 78px; padding: 76px 0 92px; }
 .section-index { color: var(--blue); font-size: 10px; letter-spacing: .14em; font-weight: 600; }
 .hero-copy { max-width: 520px; }
 h1, h2, h3, p { margin-top: 0; }
 h1, h2 { font-family: 'Noto Serif JP', serif; font-weight: 600; letter-spacing: -.06em; }
-h1 { margin: 25px 0 25px; font-size: clamp(50px, 6.2vw, 88px); line-height: 1.14; }
+h1 { margin: 25px 0 25px; font-size: clamp(48px, 5vw, 70px); line-height: 1.14; }
 h1 span { color: var(--blue); }
+h1 .hero-line { display: inline-block; color: var(--ink); font-size: .92em; white-space: nowrap; }
+h1 .hero-line > span { color: var(--blue); }
 .hero-lead { max-width: 425px; margin-bottom: 34px; color: #555c65; font-size: 14px; line-height: 2.05; }
 .hero-actions { display: flex; align-items: center; gap: 26px; }
 .primary-action { display: inline-flex; align-items: center; gap: 17px; padding: 15px 19px; background: var(--ink); color: white; font-size: 12px; transition: transform .25s ease, background .25s ease; }
@@ -61,7 +63,7 @@ h1 span { color: var(--blue); }
 .brief-note svg { color: var(--blue); }
 
 .viewpoint-section { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: 40px; padding: 34px 0 72px; border-top: 1px solid var(--line); }
-.viewpoint-copy { max-width: 580px; }
+.viewpoint-copy { max-width: 760px; }
 h2 { margin: 20px 0 13px; font-size: clamp(30px, 3.2vw, 46px); line-height: 1.35; }
 .viewpoint-copy p, .sources-copy p { max-width: 520px; margin-bottom: 0; color: var(--muted); font-size: 13px; line-height: 1.95; }
 .audience-switch { display: inline-flex; align-items: center; padding: 4px; border: 1px solid var(--line); border-radius: 999px; }

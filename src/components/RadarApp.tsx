@@ -117,7 +117,7 @@ export default function RadarApp() {
         <section className="hero-section" aria-labelledby="hero-title">
           <div className="hero-copy">
             <div className="section-index">01 / FDE TECHNOLOGY RADAR</div>
-            <h1 id="hero-title">変化を知り、<br /><span>判断材料</span>にする。</h1>
+            <h1 id="hero-title">変化を知り、<br /><span className="hero-line"><span>判断材料</span>にする。</span></h1>
             <p className="hero-lead">日本を中心に、Webとデジタルの変化を集めています。専門家だけでなく、会社や個人の「次の一歩」の参考になるように。</p>
             <div className="hero-actions">
               <a className="primary-action" href="#signals">今日のシグナルを見る <Icon name="arrow" size={17} /></a>
