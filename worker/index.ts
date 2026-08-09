@@ -14,7 +14,8 @@ import { Hono } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import postgres from 'postgres';
 
-import { sourceRegistry, type ContentType, type FdePillar, type SourceKind, type SourceRecord } from './sourceRegistry';
+import { collectionStreamFor, sourceRegistry, type ContentType, type FdePillar, type SourceKind, type SourceRecord } from './sourceRegistry';
+import { evaluateCandidate, reviewWithWorkersAI, type SemanticDecision } from './intelligence';
 
 export type IngestMessage = {
   sourceIds?: string[];
@@ -36,6 +37,7 @@ type Env = {
   ARCHIVE?: R2Bucket;
   CACHE: KVNamespace;
   INGEST_QUEUE: Queue<IngestMessage>;
+  AI: Ai;
   INGEST_TOKEN?: string;
 };
 
@@ -110,8 +112,8 @@ const CUSTOMER_PATTERN = /(customer stor|case stud|use case|business process|roi
 app.get('/api/health', (c) => c.json({
   ok: true,
   service: 'ai-fde-radar-api',
-  version: '2026-08-10-admin-analytics-pagination',
-  architecture: 'Astro + Hono + Workers + D1/FTS5 + Hyperdrive/PostgreSQL + KV + Queues',
+  version: '2026-08-10-semantic-ingestion-v1',
+  architecture: 'Astro + Hono + Workers + Workers AI + D1/FTS5 + Hyperdrive/PostgreSQL + KV + Queues',
   time: new Date().toISOString()
 }));
 
@@ -530,7 +532,7 @@ app.get('/api/admin/analytics', async (c) => {
 
 app.get('/api/ingest/status', async (c) => {
   try {
-    const [sources, runs] = await Promise.all([
+    const [sources, runs, candidates, quality] = await Promise.all([
       c.env.DB.prepare(
         `SELECT id, name, source_kind, content_type, default_pillar, fetch_mode,
                 last_success_at, last_error_at, consecutive_failures, backoff_until
@@ -540,11 +542,27 @@ app.get('/api/ingest/status', async (c) => {
         `SELECT source_id, status, discovered_count, unique_count, error_message, started_at, finished_at,
                 ingest_mode, backfill_page, since_at
          FROM fetch_runs ORDER BY started_at DESC LIMIT 20`
+      ).all(),
+      c.env.DB.prepare(
+        `SELECT status, COUNT(*) AS count FROM ingest_candidates GROUP BY status ORDER BY count DESC`
+      ).all(),
+      c.env.DB.prepare(
+        `SELECT q.source_id, s.name,
+                SUM(q.discovered_count) AS discovered_count,
+                SUM(q.hard_rejected_count) AS hard_rejected_count,
+                SUM(q.semantic_reviewed_count) AS semantic_reviewed_count,
+                SUM(q.semantic_rejected_count) AS semantic_rejected_count,
+                SUM(q.published_count) AS published_count,
+                SUM(q.duplicate_count) AS duplicate_count,
+                SUM(q.ai_error_count) AS ai_error_count
+         FROM source_quality_daily q JOIN sources s ON s.id = q.source_id
+         WHERE q.day >= date('now', '-7 days')
+         GROUP BY q.source_id, s.name ORDER BY published_count DESC, discovered_count DESC`
       ).all()
     ]);
-    return c.json({ sources: sources.results, runs: runs.results });
+    return c.json({ sources: sources.results, runs: runs.results, candidates: candidates.results, quality: quality.results });
   } catch (error) {
-    return c.json({ sources: [], runs: [], error: errorMessage(error) }, 503);
+    return c.json({ sources: [], runs: [], candidates: [], quality: [], error: errorMessage(error) }, 503);
   }
 });
 
@@ -631,6 +649,11 @@ async function readSources(env: Env, sourceIds?: string[], force = false): Promi
           parseMode: registrySource?.parseMode,
           backfillPages: registrySource?.backfillPages,
           backfillMode: registrySource?.backfillMode,
+          stream: registrySource ? collectionStreamFor(registrySource) : 'production-pattern',
+          semanticPolicy: registrySource?.semanticPolicy ?? 'required',
+          dailyItemCap: registrySource?.dailyItemCap ?? 20,
+          includeTerms: registrySource?.includeTerms,
+          excludeTerms: registrySource?.excludeTerms,
           priority: source.priority,
           pollIntervalMinutes: source.poll_interval_minutes,
           etag: source.etag ?? undefined,
@@ -649,8 +672,9 @@ async function syncSourceRegistry(env: Env): Promise<void> {
     `INSERT INTO sources
       (id, name, homepage, feed_url, api_url, fetch_mode, language, country, source_kind,
        content_type, default_pillar, source_tier, source_weight, min_fde_score, priority,
-       poll_interval_minutes, allowed_fetch, parser_version, robots_checked_at, tos_reviewed_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '3', ?, ?)
+       poll_interval_minutes, allowed_fetch, parser_version, robots_checked_at, tos_reviewed_at,
+       collection_stream, semantic_policy, daily_item_cap)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '4', ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        name = excluded.name, homepage = excluded.homepage, feed_url = excluded.feed_url,
        api_url = excluded.api_url, fetch_mode = excluded.fetch_mode, language = excluded.language,
@@ -659,13 +683,15 @@ async function syncSourceRegistry(env: Env): Promise<void> {
        source_tier = excluded.source_tier, source_weight = excluded.source_weight,
        min_fde_score = excluded.min_fde_score, priority = excluded.priority,
        poll_interval_minutes = excluded.poll_interval_minutes, allowed_fetch = excluded.allowed_fetch,
-       parser_version = '3', updated_at = CURRENT_TIMESTAMP`
+       collection_stream = excluded.collection_stream, semantic_policy = excluded.semantic_policy,
+       daily_item_cap = excluded.daily_item_cap, parser_version = '4', updated_at = CURRENT_TIMESTAMP`
   ).bind(
     source.id, source.name, source.homepage, source.feedUrl ?? null, source.apiUrl ?? null,
     source.fetchMode, source.language, source.country, source.kind, source.contentType,
     source.defaultPillar, source.sourceTier, source.weight, source.minScore, source.priority,
     source.pollIntervalMinutes, source.enabled === false ? 0 : 1,
-    new Date().toISOString().slice(0, 10), new Date().toISOString().slice(0, 10)
+    new Date().toISOString().slice(0, 10), new Date().toISOString().slice(0, 10),
+    collectionStreamFor(source), source.semanticPolicy ?? 'required', source.dailyItemCap ?? 20
   ));
   for (let index = 0; index < statements.length; index += 20) {
     await env.DB.batch(statements.slice(index, index + 20));
@@ -701,9 +727,7 @@ async function fetchSourceItems(source: SourceRecord, options: IngestOptions): P
           window = window.slice(offset, offset + pageSize);
         }
       }
-      const items = window
-        .map((item) => enrichItem(source, item))
-        .filter((item) => item.fdeScore >= source.minScore);
+      const items = window.map((item) => enrichItem(source, item));
       return { items, meta: { ...result, mode: candidate.mode } };
     } catch (error) {
       lastError = error as FetchFailure;
@@ -912,22 +936,126 @@ async function parseSingleCareerPage(source: SourceRecord, response: Response): 
   }];
 }
 
+async function recordCandidate(
+  env: Env,
+  source: SourceRecord,
+  candidateId: string,
+  canonicalUrl: string,
+  contentHash: string,
+  item: DiscoveredItem,
+  gate: ReturnType<typeof evaluateCandidate>,
+  semantic?: SemanticDecision,
+  status: 'pending' | 'published' | 'rejected' = 'pending',
+  articleId?: string
+): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO ingest_candidates
+      (id, source_id, canonical_url, content_hash, payload, hard_gate_decision, hard_gate_score,
+       hard_gate_reasons, semantic_decision, semantic_confidence, semantic_model, rejection_reason,
+       status, first_seen_at, last_seen_at, analyzed_at, published_article_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?)
+     ON CONFLICT(source_id, canonical_url, content_hash) DO UPDATE SET
+       payload = excluded.payload, hard_gate_decision = excluded.hard_gate_decision,
+       hard_gate_score = excluded.hard_gate_score, hard_gate_reasons = excluded.hard_gate_reasons,
+       semantic_decision = excluded.semantic_decision, semantic_confidence = excluded.semantic_confidence,
+       semantic_model = excluded.semantic_model, rejection_reason = excluded.rejection_reason,
+       status = excluded.status, last_seen_at = CURRENT_TIMESTAMP,
+       analyzed_at = excluded.analyzed_at, published_article_id = excluded.published_article_id`
+  ).bind(
+    candidateId, source.id, canonicalUrl, contentHash, JSON.stringify(item), gate.decision, gate.score,
+    JSON.stringify(gate.reasons), semantic?.decision ?? (status === 'rejected' ? 'skipped' : 'pending'), semantic?.confidence ?? 0,
+    semantic ? '@cf/meta/llama-3.1-8b-instruct-fast' : '', semantic?.rejectionReason ?? '', status,
+    semantic ? new Date().toISOString() : null, articleId ?? null
+  ).run();
+}
+
+async function recordSourceQuality(env: Env, sourceId: string, values: {
+  discovered: number; hardRejected: number; semanticReviewed: number; semanticRejected: number;
+  published: number; duplicates: number; aiErrors: number;
+}): Promise<void> {
+  const day = new Date().toISOString().slice(0, 10);
+  await env.DB.prepare(
+    `INSERT INTO source_quality_daily
+      (source_id, day, discovered_count, hard_rejected_count, semantic_reviewed_count,
+       semantic_rejected_count, published_count, duplicate_count, ai_error_count)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(source_id, day) DO UPDATE SET
+       discovered_count = discovered_count + excluded.discovered_count,
+       hard_rejected_count = hard_rejected_count + excluded.hard_rejected_count,
+       semantic_reviewed_count = semantic_reviewed_count + excluded.semantic_reviewed_count,
+       semantic_rejected_count = semantic_rejected_count + excluded.semantic_rejected_count,
+       published_count = published_count + excluded.published_count,
+       duplicate_count = duplicate_count + excluded.duplicate_count,
+       ai_error_count = ai_error_count + excluded.ai_error_count`
+  ).bind(sourceId, day, values.discovered, values.hardRejected, values.semanticReviewed,
+    values.semanticRejected, values.published, values.duplicates, values.aiErrors).run();
+}
+
 async function ingestSource(env: Env, source: SourceRecord, options: IngestOptions): Promise<{ discovered: number; unique: number }> {
   const startedAt = new Date().toISOString();
   const runId = crypto.randomUUID();
   try {
     const result = await fetchSourceItems(source, options);
+    const previousQuality = await env.DB.prepare(
+      `SELECT semantic_reviewed_count FROM source_quality_daily WHERE source_id = ? AND day = ?`
+    ).bind(source.id, new Date().toISOString().slice(0, 10)).first<{ semantic_reviewed_count: number }>();
+    let semanticBudget = Math.max(0, (source.dailyItemCap ?? 20) - Number(previousQuality?.semantic_reviewed_count ?? 0));
     let unique = 0;
+    let hardRejected = 0;
+    let semanticReviewed = 0;
+    let semanticRejected = 0;
+    let published = 0;
+    let duplicates = 0;
+    let aiErrors = 0;
     for (const item of result.items) {
       const canonicalUrl = normalizeUrl(item.url);
       if (!canonicalUrl || item.title.length < 4) continue;
+      const contentHash = await sha256(`${item.title}\n${item.summary}\n${item.tags.join(' ')}`);
+      const candidateId = await sha256(`${source.id}\n${canonicalUrl}\n${contentHash}`);
+      const priorCandidate = await env.DB.prepare(
+        `SELECT status FROM ingest_candidates WHERE source_id = ? AND canonical_url = ? AND content_hash = ?`
+      ).bind(source.id, canonicalUrl, contentHash).first<{ status: string }>();
+      if (priorCandidate?.status === 'published' || priorCandidate?.status === 'rejected') {
+        duplicates += 1;
+        await env.DB.prepare('UPDATE ingest_candidates SET last_seen_at = CURRENT_TIMESTAMP WHERE id = ?').bind(candidateId).run();
+        continue;
+      }
+      const gate = evaluateCandidate(source, item);
+      if (gate.decision === 'reject' || gate.score < source.minScore) {
+        hardRejected += 1;
+        await recordCandidate(env, source, candidateId, canonicalUrl, contentHash, item, gate, undefined, 'rejected');
+        continue;
+      }
+      let semantic: SemanticDecision | undefined;
+      const semanticPolicy = source.semanticPolicy ?? 'required';
+      if (semanticPolicy === 'required' || (semanticPolicy === 'fallback' && gate.decision === 'review')) {
+        if (semanticBudget <= 0) {
+          await recordCandidate(env, source, candidateId, canonicalUrl, contentHash, item, gate, undefined, 'pending');
+          continue;
+        }
+        semanticBudget -= 1;
+        semanticReviewed += 1;
+        try {
+          semantic = await reviewWithWorkersAI(env.AI, source, item);
+        } catch (error) {
+          aiErrors += 1;
+          console.error('semantic review failed', source.id, errorMessage(error));
+          await recordCandidate(env, source, candidateId, canonicalUrl, contentHash, item, gate, undefined, 'pending');
+          continue;
+        }
+        if (semantic.decision !== 'publish' || semantic.confidence < 0.62) {
+          if (semantic.decision === 'reject') semanticRejected += 1;
+          await recordCandidate(env, source, candidateId, canonicalUrl, contentHash, item, gate, semantic,
+            semantic.decision === 'reject' ? 'rejected' : 'pending');
+          continue;
+        }
+      }
       const existing = await env.DB.prepare(
         'SELECT id, content_hash FROM articles WHERE canonical_url = ?'
       ).bind(canonicalUrl).first<{ id: string; content_hash: string | null }>();
       const id = existing?.id ?? crypto.randomUUID();
       const urlHash = await sha256(canonicalUrl);
       const titleNormalized = item.title.normalize('NFKC').toLowerCase();
-      const contentHash = await sha256(`${item.title}\n${item.summary}\n${item.tags.join(' ')}`);
       const searchTokensJa = tokenizeJapanese(`${item.title} ${item.summary} ${item.summaryJa} ${item.tags.join(' ')} ${item.location} ${item.sector} ${item.pillar} ${item.subtopic}`);
       const impacts = inferImpactTags(source, item);
       const intelligence = inferIntelligence(source, item);
@@ -1016,6 +1144,28 @@ async function ingestSource(env: Env, source: SourceRecord, options: IngestOptio
         await env.DB.prepare(
           'INSERT INTO articles_fts (article_id, title, summary, tags, search_tokens_ja) VALUES (?, ?, ?, ?, ?)'
         ).bind(stored.id, item.title, item.summaryJa ?? item.summary, item.tags.join(' '), searchTokensJa).run();
+        await env.DB.prepare(
+          `UPDATE articles SET semantic_decision = ?, semantic_confidence = ?, semantic_model = ?,
+             semantic_analyzed_at = ?, rejection_reason = '', collection_stream = ?, event_fingerprint = ?,
+             core_pillar = COALESCE(?, core_pillar), topic_layers = CASE WHEN ? <> '[]' THEN ? ELSE topic_layers END,
+             signal_type = COALESCE(?, signal_type), relevance_score = COALESCE(?, relevance_score),
+             actionability_score = COALESCE(?, actionability_score), client_fit_score = COALESCE(?, client_fit_score),
+             why_it_matters = CASE WHEN ? <> '' THEN ? ELSE why_it_matters END,
+             recommended_action = CASE WHEN ? <> '' THEN ? ELSE recommended_action END,
+             evidence = CASE WHEN ? <> '' THEN ? ELSE evidence END
+           WHERE id = ?`
+        ).bind(
+          semantic?.decision ?? 'rules', semantic?.confidence ?? 1,
+          semantic ? '@cf/meta/llama-3.1-8b-instruct-fast' : '', semantic ? new Date().toISOString() : null,
+          collectionStreamFor(source), await sha256(titleNormalized.replace(/\b20\d{2}\b/g, '')),
+          semantic?.corePillar ?? null, JSON.stringify(semantic?.topics ?? []), JSON.stringify(semantic?.topics ?? []),
+          semantic?.signalType ?? null, semantic?.relevanceScore ?? null, semantic?.actionabilityScore ?? null,
+          semantic?.clientFitScore ?? null, semantic?.whyItMattersJa ?? '', semantic?.whyItMattersJa ?? '',
+          semantic?.recommendedActionJa ?? '', semantic?.recommendedActionJa ?? '',
+          semantic?.evidenceJa ?? '', semantic?.evidenceJa ?? '', stored.id
+        ).run();
+        await recordCandidate(env, source, candidateId, canonicalUrl, contentHash, item, gate, semantic, 'published', stored.id);
+        published += 1;
       }
       if (!existing || existing.content_hash !== contentHash) {
         unique += 1;
@@ -1024,8 +1174,12 @@ async function ingestSource(env: Env, source: SourceRecord, options: IngestOptio
            (id, article_id, source_id, content_hash, title, summary, captured_at)
            VALUES (?, ?, ?, ?, ?, ?, ?)`
         ).bind(crypto.randomUUID(), id, source.id, contentHash, item.title, item.summary, new Date().toISOString()).run();
-      }
+      } else duplicates += 1;
     }
+    await recordSourceQuality(env, source.id, {
+      discovered: result.items.length, hardRejected, semanticReviewed, semanticRejected,
+      published, duplicates, aiErrors
+    });
     await env.DB.prepare(
       `INSERT INTO fetch_runs
        (id, source_id, status, discovered_count, unique_count, started_at, finished_at, ingest_mode, backfill_page, since_at)

@@ -6,7 +6,7 @@ AI導入の変化を `Customer → Build → Deploy → Govern → Organization`
 
 ## 主な機能
 
-- 6時間ごとの定期収集と D1/FTS5 検索
+- 6時間ごとの定期収集、Workers AI による意味判定、D1/FTS5 検索
 - P0（今日対応）・P1（今週検証）・P2（背景学習）の判断レベル
 - 10件単位のサーバーサイドページングと絞り込み
 - メール不要のパスキー登録・ログインと記事保存
@@ -22,6 +22,7 @@ AI導入の変化を `Customer → Build → Deploy → Govern → Organization`
 - **Astro**: SEO を意識した公開サイト
 - **Hono**: Worker 内の `/api/*` と ingest の HTTP 入口
 - **Cloudflare Workers Static Assets**: Astro の静的アセット配信
+- **Workers AI**: 硬いルールを通過した境界候補だけを FDE の意味で判定
 - **D1 + FTS5**: 記事メタデータ、全文検索、アカウント、WebAuthn challenge、保存記事
 - **Hyperdrive + PostgreSQL**: Mini PC 上の許可された構造化アーカイブの保存
 - **R2（任意）**: PostgreSQL が利用できない環境向けのアーカイブ fallback
@@ -38,7 +39,7 @@ API → RSS / Atom → 静的 HTML（HTMLRewriter）
 
 取得済みの Source では `ETag` と `Last-Modified` を再送し、`304` は再保存しません。`429` は `Retry-After` を尊重し、指数バックオフと `backoff_until` を D1 に記録します。`403 / 401 / CAPTCHA / ログイン壁` を迂回せず、明示された次の取得面だけに降格します。
 
-タイトルに AI と書かれているだけでは公開しません。顧客、導入、本番化、評価、運用、採用役割などの複合条件から `fde_score`（0〜100）を計算し、Source ごとの基準未満の一般 AI ニュースや一般開発記事を除外します。通常巡回は既存の履歴を消さず、新着と更新だけを追加します。
+タイトルに AI と書かれているだけでは公開しません。まず顧客、導入、本番化、評価、運用、採用役割などの硬い条件で除外し、境界候補だけを Workers AI が構造化 JSON で再判定します。AI 判定が失敗した候補は誤公開せず `pending` に残します。収録・拒否の理由、信頼度、モデル版は `ingest_candidates` に保存します。詳細は [収集・判定アーキテクチャ](docs/ingestion-architecture.md) を参照してください。
 
 各項目には Core Pillar、Japan Lens、Topic Layer、Affected Stack、Content Type、Region、P0/P1/P2、推奨アクション、判定根拠、原典 URL を保存します。過去記事を一件ずつ手作業で要約せず、Source が提供する要約と今後の自動取得時の抽出結果を使います。タイトルや要約が変わったときは `article_versions` に変更履歴を残します。
 
@@ -57,9 +58,9 @@ P0 は直近14日以内の、信頼できる情報源にある明確な脆弱性
 Source Registry は日本とグローバルの一次情報、実装メディア、コミュニティ、求人、研究を分離して管理します。
 
 - 上流一次情報: OpenAI News / Platform Changelog、Anthropic、Palantir
-- 実装・クラウド: Google Cloud、Microsoft Azure、GitHub、AWS、Cloudflare
-- 日本の行政・安全: デジタル庁、IPA
-- 日本の企業・技術メディア: Publickey、ITmedia AI+、CodeZine、EnterpriseZine、DevelopersIO、LY、CyberAgent
+- 実装・クラウド: Vertex AI Release Notes、Microsoft Azure、GitHub、AWS AgentCore、Cloudflare
+- 日本の行政・安全: デジタル庁 Gennai、IPA、経済産業省
+- 日本の企業・技術メディア: Publickey、ITmedia AI+、CodeZine、EnterpriseZine、DevelopersIO、LY、CyberAgent、DeNA、Recruit、NTT DATA
 - 日本の現場共有・求人: Qiita、Zenn、AI Native Careers、TokyoDev、Yahoo!ニュース IT
 - 研究・レポート: FDE 隣接テーマに限定した arXiv、Stanford AI Index
 - 動画: OpenAI、Anthropic、Google Cloud、AWS、Cloudflare、Palantir の公式 YouTube Feed
@@ -97,7 +98,8 @@ npm run db:seed
 3. `migrations/postgres/0001_archive.sql` を PostgreSQL の `fde` database で実行する。
 4. `wrangler kv namespace create CACHE` で KV namespace を作成し、返された ID を `wrangler.toml` に設定する。
 5. `wrangler queues create fde-radar-ingest` で Queue を作成する。
-6. `npm run db:migrate:remote` と `npm run cf:deploy` を実行する。
+6. `wrangler.toml` に `[ai]` の `AI` binding を設定する。
+7. `npm run db:migrate:remote` と `npm run cf:deploy` を実行する。
 
 R2 はこの構成では必須ではありません。既存の Workers VPC + Hyperdrive + PostgreSQL を優先して使うため、R2 のアカウント有効化やカード登録なしでアーカイブを保存できます。R2 を使う場合だけ Dashboard で有効化し、bucket を作成して binding のコメントを外してください。
 
