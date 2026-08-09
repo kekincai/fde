@@ -110,7 +110,7 @@ const CUSTOMER_PATTERN = /(customer stor|case stud|use case|business process|roi
 app.get('/api/health', (c) => c.json({
   ok: true,
   service: 'ai-fde-radar-api',
-  version: '2026-08-09-passkey-d1',
+  version: '2026-08-10-admin-analytics-pagination',
   architecture: 'Astro + Hono + Workers + D1/FTS5 + Hyperdrive/PostgreSQL + KV + Queues',
   time: new Date().toISOString()
 }));
@@ -132,7 +132,8 @@ app.get('/api/articles', async (c) => {
   const topicLayer = c.req.query('layer')?.trim() ?? '';
   const channel = c.req.query('channel') ?? 'action';
   const contentType = c.req.query('type') ?? 'すべて';
-  const limit = Math.min(Math.max(Number(c.req.query('limit') ?? 60), 1), 100);
+  const page = Math.max(Number(c.req.query('page') ?? 1) || 1, 1);
+  const pageSize = Math.min(Math.max(Number(c.req.query('pageSize') ?? 10) || 10, 1), 25);
   try {
     const clauses = ["a.status = 'published'", 'a.fde_score >= 40'];
     const values: Array<string | number> = [];
@@ -167,15 +168,25 @@ app.get('/api/articles', async (c) => {
       clauses.unshift('articles_fts MATCH ?');
       values.unshift(searchQuery);
     }
-    values.push(limit);
-    const result = await c.env.DB.prepare(
+    const countValues = [...values];
+    const [count, result] = await Promise.all([
+      c.env.DB.prepare(
+        `SELECT COUNT(*) AS total FROM ${from} WHERE ${clauses.join(' AND ')}`
+      ).bind(...countValues).first<{ total: number }>(),
+      c.env.DB.prepare(
       `SELECT a.*, s.name AS source_name, s.source_kind
        FROM ${from}
        WHERE ${clauses.join(' AND ')}
        ORDER BY CASE a.priority_level WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 ELSE 2 END,
-                a.priority_score DESC, a.published_at DESC LIMIT ?`
-    ).bind(...values).all();
-    return c.json({ articles: result.results, source: searchQuery ? 'd1-fts5' : 'd1' }, 200, {
+                a.priority_score DESC, a.published_at DESC LIMIT ? OFFSET ?`
+      ).bind(...values, pageSize, (page - 1) * pageSize).all()
+    ]);
+    const total = Number(count?.total ?? 0);
+    return c.json({
+      articles: result.results,
+      pagination: { page, pageSize, total, totalPages: Math.max(1, Math.ceil(total / pageSize)) },
+      source: searchQuery ? 'd1-fts5' : 'd1'
+    }, 200, {
       'Cache-Control': 'public, max-age=30, s-maxage=300'
     });
   } catch (error) {
@@ -261,7 +272,7 @@ app.post('/api/auth/passkey/register/verify', async (c) => {
     ]);
     const session = await createSession(c.env, state.user_id, c.req.header('user-agent') ?? '');
     setSessionCookie(c, session.token);
-    return c.json({ user: { id: state.user_id, displayName: state.display_name }, bookmarkIds: [] }, 201);
+    return c.json({ user: { id: state.user_id, displayName: state.display_name, isAdmin: false }, bookmarkIds: [] }, 201);
   } catch (error) { return c.json({ error: `パスキーを登録できませんでした。${errorMessage(error)}` }, 400); }
 });
 
@@ -286,9 +297,9 @@ app.post('/api/auth/passkey/login/verify', async (c) => {
   ).bind(payload.flowId).first<{ challenge: string }>();
   if (!challengeRow) return c.json({ error: 'ログインの有効時間が切れました。もう一度お試しください。' }, 400);
   const credential = await c.env.DB.prepare(
-    `SELECT p.id, p.user_id, p.public_key, p.counter, p.transports, u.display_name
+    `SELECT p.id, p.user_id, p.public_key, p.counter, p.transports, u.display_name, u.role
      FROM passkey_credentials p JOIN users u ON u.id = p.user_id WHERE p.id = ?`
-  ).bind(payload.response.id).first<{ id: string; user_id: string; public_key: ArrayBuffer; counter: number; transports: string; display_name: string }>();
+  ).bind(payload.response.id).first<{ id: string; user_id: string; public_key: ArrayBuffer; counter: number; transports: string; display_name: string; role: string }>();
   if (!credential) return c.json({ error: 'このパスキーは登録されていません。' }, 401);
   const { rpID, origin } = relyingParty(c.req.raw);
   try {
@@ -302,7 +313,7 @@ app.post('/api/auth/passkey/login/verify', async (c) => {
     const session = await createSession(c.env, credential.user_id, c.req.header('user-agent') ?? '');
     setSessionCookie(c, session.token);
     const bookmarks = await c.env.DB.prepare('SELECT article_id FROM user_bookmarks WHERE user_id = ?').bind(credential.user_id).all<{ article_id: string }>();
-    return c.json({ user: { id: credential.user_id, displayName: credential.display_name }, bookmarkIds: bookmarks.results.map((row) => row.article_id) });
+    return c.json({ user: { id: credential.user_id, displayName: credential.display_name, isAdmin: credential.role === 'admin' }, bookmarkIds: bookmarks.results.map((row) => row.article_id) });
   } catch (error) { return c.json({ error: `ログインできませんでした。${errorMessage(error)}` }, 401); }
 });
 
@@ -310,7 +321,7 @@ app.get('/api/auth/me', async (c) => {
   const session = await readSession(c.env, getCookie(c, SESSION_COOKIE));
   if (!session) return c.json({ user: null, bookmarkIds: [] });
   const bookmarks = await c.env.DB.prepare('SELECT article_id FROM user_bookmarks WHERE user_id = ? ORDER BY created_at DESC').bind(session.userId).all<{ article_id: string }>();
-  return c.json({ user: { id: session.userId, displayName: session.displayName }, bookmarkIds: bookmarks.results.map((row) => row.article_id) });
+  return c.json({ user: { id: session.userId, displayName: session.displayName, isAdmin: session.isAdmin }, bookmarkIds: bookmarks.results.map((row) => row.article_id) });
 });
 
 app.post('/api/auth/logout', async (c) => {
@@ -349,12 +360,35 @@ app.delete('/api/auth/sessions/:id', async (c) => {
 app.get('/api/bookmarks', async (c) => {
   const session = await readSession(c.env, getCookie(c, SESSION_COOKIE));
   if (!session) return c.json({ error: 'ログインが必要です。' }, 401);
-  const rows = await c.env.DB.prepare(
-    `SELECT a.*, s.name AS source_name, s.source_kind, b.created_at AS bookmarked_at
-     FROM user_bookmarks b JOIN articles a ON a.id = b.article_id JOIN sources s ON s.id = a.source_id
-     WHERE b.user_id = ? ORDER BY CASE a.priority_level WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 ELSE 2 END, b.created_at DESC`
-  ).bind(session.userId).all();
-  return c.json({ articles: rows.results });
+  const page = Math.max(Number(c.req.query('page') ?? 1) || 1, 1);
+  const pageSize = Math.min(Math.max(Number(c.req.query('pageSize') ?? 10) || 10, 1), 25);
+  const query = c.req.query('q')?.trim() ?? '';
+  const clauses = ['b.user_id = ?'];
+  const values: Array<string | number> = [session.userId];
+  const region = c.req.query('region') ?? 'ALL';
+  const pillar = c.req.query('pillar') ?? 'すべて';
+  const priority = c.req.query('priority') ?? 'ALL';
+  const topicLayer = c.req.query('layer')?.trim() ?? '';
+  if (region !== 'ALL') { clauses.push('a.region = ?'); values.push(region); }
+  if (pillar !== 'すべて') { clauses.push('a.core_pillar = ?'); values.push(pillar); }
+  if (priority !== 'ALL') { clauses.push('a.priority_level = ?'); values.push(priority); }
+  if (topicLayer) { clauses.push('EXISTS (SELECT 1 FROM json_each(a.topic_layers) WHERE value = ?)'); values.push(topicLayer); }
+  const searchQuery = query ? buildFtsQuery(query) : '';
+  const from = searchQuery
+    ? 'user_bookmarks b JOIN articles_fts f ON f.article_id = b.article_id JOIN articles a ON a.id = b.article_id JOIN sources s ON s.id = a.source_id'
+    : 'user_bookmarks b JOIN articles a ON a.id = b.article_id JOIN sources s ON s.id = a.source_id';
+  if (searchQuery) { clauses.unshift('articles_fts MATCH ?'); values.unshift(searchQuery); }
+  const [count, rows] = await Promise.all([
+    c.env.DB.prepare(`SELECT COUNT(*) AS total FROM ${from} WHERE ${clauses.join(' AND ')}`).bind(...values).first<{ total: number }>(),
+    c.env.DB.prepare(
+      `SELECT a.*, s.name AS source_name, s.source_kind, b.created_at AS bookmarked_at
+       FROM ${from} WHERE ${clauses.join(' AND ')}
+       ORDER BY CASE a.priority_level WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 ELSE 2 END,
+       b.created_at DESC LIMIT ? OFFSET ?`
+    ).bind(...values, pageSize, (page - 1) * pageSize).all()
+  ]);
+  const total = Number(count?.total ?? 0);
+  return c.json({ articles: rows.results, pagination: { page, pageSize, total, totalPages: Math.max(1, Math.ceil(total / pageSize)) } });
 });
 
 app.put('/api/bookmarks/:articleId', async (c) => {
@@ -366,7 +400,8 @@ app.put('/api/bookmarks/:articleId', async (c) => {
   if (!exists) return c.json({ error: '記事が見つかりません。' }, 404);
   await c.env.DB.batch([
     c.env.DB.prepare('INSERT OR IGNORE INTO user_bookmarks (user_id, article_id) VALUES (?, ?)').bind(session.userId, articleId),
-    c.env.DB.prepare("INSERT INTO user_actions (id, user_id, article_id, action) VALUES (?, ?, ?, 'saved')").bind(crypto.randomUUID(), session.userId, articleId)
+    c.env.DB.prepare("INSERT INTO user_actions (id, user_id, article_id, action) VALUES (?, ?, ?, 'saved')").bind(crypto.randomUUID(), session.userId, articleId),
+    c.env.DB.prepare("INSERT INTO analytics_events (id, event_name, user_id, article_id, section) VALUES (?, 'bookmark_save', ?, ?, 'saved')").bind(crypto.randomUUID(), session.userId, articleId)
   ]);
   return c.json({ saved: true });
 });
@@ -378,7 +413,8 @@ app.delete('/api/bookmarks/:articleId', async (c) => {
   const articleId = c.req.param('articleId');
   await c.env.DB.batch([
     c.env.DB.prepare('DELETE FROM user_bookmarks WHERE user_id = ? AND article_id = ?').bind(session.userId, articleId),
-    c.env.DB.prepare("INSERT INTO user_actions (id, user_id, article_id, action) VALUES (?, ?, ?, 'unsaved')").bind(crypto.randomUUID(), session.userId, articleId)
+    c.env.DB.prepare("INSERT INTO user_actions (id, user_id, article_id, action) VALUES (?, ?, ?, 'unsaved')").bind(crypto.randomUUID(), session.userId, articleId),
+    c.env.DB.prepare("INSERT INTO analytics_events (id, event_name, user_id, article_id, section) VALUES (?, 'bookmark_remove', ?, ?, 'saved')").bind(crypto.randomUUID(), session.userId, articleId)
   ]);
   return c.json({ saved: false });
 });
@@ -389,6 +425,107 @@ app.post('/api/articles/:articleId/open', async (c) => {
   if (session) await c.env.DB.prepare("INSERT INTO user_actions (id, user_id, article_id, action) VALUES (?, ?, ?, 'opened')")
     .bind(crypto.randomUUID(), session.userId, c.req.param('articleId')).run().catch(() => undefined);
   return c.json({ ok: true });
+});
+
+app.post('/api/analytics/events', async (c) => {
+  if (!sameOrigin(c.req.raw)) return c.json({ ok: false }, 403);
+  const payload = await c.req.json().catch(() => ({})) as {
+    eventName?: string; visitorId?: string; articleId?: string; section?: string; deviceType?: string;
+  };
+  const allowedEvents = new Set(['page_view', 'section_view', 'article_open', 'source_click', 'bookmark_save', 'bookmark_remove']);
+  const allowedSections = new Set(['about', 'action', 'japan', 'research', 'saved', 'admin']);
+  const allowedDevices = new Set(['desktop', 'tablet', 'mobile']);
+  if (!payload.eventName || !allowedEvents.has(payload.eventName)) return c.json({ ok: false }, 400);
+  const section = allowedSections.has(payload.section ?? '') ? payload.section! : '';
+  const deviceType = allowedDevices.has(payload.deviceType ?? '') ? payload.deviceType! : 'desktop';
+  const visitorId = cleanText(payload.visitorId ?? '').slice(0, 80);
+  const articleId = cleanText(payload.articleId ?? '').slice(0, 80) || null;
+  const session = await readSession(c.env, getCookie(c, SESSION_COOKIE));
+  try {
+    await c.env.DB.prepare(
+      `INSERT INTO analytics_events
+       (id, event_name, user_id, anonymous_id_hash, article_id, section, device_type)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).bind(crypto.randomUUID(), payload.eventName, session?.userId ?? null, visitorId ? await sha256(visitorId) : '', articleId, section, deviceType).run();
+    return c.json({ ok: true });
+  } catch {
+    return c.json({ ok: false }, 400);
+  }
+});
+
+app.get('/api/admin/analytics', async (c) => {
+  const session = await readSession(c.env, getCookie(c, SESSION_COOKIE));
+  if (!session) return c.json({ error: 'ログインが必要です。' }, 401);
+  if (!session.isAdmin) return c.json({ error: '管理者権限が必要です。' }, 403);
+  const requestedDays = Number(c.req.query('days') ?? 30);
+  const days = [7, 30, 90].includes(requestedDays) ? requestedDays : 30;
+  const since = `-${days} days`;
+  try {
+    const [metrics, users, trend, popularArticles, sections, devices, ingest, sourceHealth] = await Promise.all([
+      c.env.DB.prepare(
+        `SELECT
+          SUM(CASE WHEN event_name = 'page_view' THEN 1 ELSE 0 END) AS page_views,
+          SUM(CASE WHEN event_name = 'article_open' THEN 1 ELSE 0 END) AS article_opens,
+          SUM(CASE WHEN event_name = 'source_click' THEN 1 ELSE 0 END) AS source_clicks,
+          SUM(CASE WHEN event_name = 'bookmark_save' THEN 1 ELSE 0 END) AS bookmark_saves,
+          COUNT(DISTINCT CASE WHEN user_id IS NOT NULL THEN user_id ELSE anonymous_id_hash END) AS visitors
+         FROM analytics_events WHERE occurred_at >= datetime('now', ?)`
+      ).bind(since).first(),
+      c.env.DB.prepare(
+        `SELECT COUNT(*) AS total_users,
+          SUM(CASE WHEN created_at >= datetime('now', ?) THEN 1 ELSE 0 END) AS new_users
+         FROM users`
+      ).bind(since).first(),
+      c.env.DB.prepare(
+        `SELECT date(occurred_at) AS day,
+          SUM(CASE WHEN event_name = 'page_view' THEN 1 ELSE 0 END) AS page_views,
+          SUM(CASE WHEN event_name = 'article_open' THEN 1 ELSE 0 END) AS article_opens,
+          SUM(CASE WHEN event_name = 'bookmark_save' THEN 1 ELSE 0 END) AS bookmark_saves
+         FROM analytics_events WHERE occurred_at >= datetime('now', ?)
+         GROUP BY date(occurred_at) ORDER BY day`
+      ).bind(since).all(),
+      c.env.DB.prepare(
+        `SELECT a.id, a.title, s.name AS source_name,
+          SUM(CASE WHEN e.event_name = 'article_open' THEN 1 ELSE 0 END) AS opens,
+          SUM(CASE WHEN e.event_name = 'source_click' THEN 1 ELSE 0 END) AS source_clicks,
+          SUM(CASE WHEN e.event_name = 'bookmark_save' THEN 1 ELSE 0 END) AS saves
+         FROM analytics_events e JOIN articles a ON a.id = e.article_id JOIN sources s ON s.id = a.source_id
+         WHERE e.occurred_at >= datetime('now', ?)
+         GROUP BY a.id, a.title, s.name ORDER BY (opens + source_clicks + saves) DESC LIMIT 8`
+      ).bind(since).all(),
+      c.env.DB.prepare(
+        `SELECT section, COUNT(*) AS views FROM analytics_events
+         WHERE event_name IN ('page_view', 'section_view') AND occurred_at >= datetime('now', ?) AND section != ''
+         GROUP BY section ORDER BY views DESC`
+      ).bind(since).all(),
+      c.env.DB.prepare(
+        `SELECT device_type, COUNT(*) AS views FROM analytics_events
+         WHERE event_name = 'page_view' AND occurred_at >= datetime('now', ?)
+         GROUP BY device_type ORDER BY views DESC`
+      ).bind(since).all(),
+      c.env.DB.prepare(
+        `SELECT COUNT(*) AS runs,
+          SUM(CASE WHEN status IN ('success', 'not_modified') THEN 1 ELSE 0 END) AS successful_runs,
+          SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS failed_runs,
+          SUM(unique_count) AS new_articles
+         FROM fetch_runs WHERE started_at >= datetime('now', ?)`
+      ).bind(since).first(),
+      c.env.DB.prepare(
+        `SELECT name, last_success_at, last_error_at, consecutive_failures
+         FROM sources WHERE allowed_fetch = 1 ORDER BY consecutive_failures DESC, name LIMIT 8`
+      ).all()
+    ]);
+    const ingestRuns = Number((ingest as { runs?: number } | null)?.runs ?? 0);
+    const successfulRuns = Number((ingest as { successful_runs?: number } | null)?.successful_runs ?? 0);
+    return c.json({
+      days, metrics, users, trend: trend.results, popularArticles: popularArticles.results,
+      sections: sections.results, devices: devices.results,
+      ingest: { ...ingest, successRate: ingestRuns ? Math.round(successfulRuns / ingestRuns * 1000) / 10 : 100 },
+      sourceHealth: sourceHealth.results, measuredSince: new Date(Date.now() - days * 86_400_000).toISOString()
+    });
+  } catch (error) {
+    return c.json({ error: errorMessage(error) }, 503);
+  }
 });
 
 app.get('/api/ingest/status', async (c) => {
@@ -1252,7 +1389,7 @@ function isAuthorized(request: Request, env: Env): boolean {
   return request.headers.get('authorization') === `Bearer ${env.INGEST_TOKEN}`;
 }
 
-type SessionIdentity = { sessionId: string; userId: string; displayName: string };
+type SessionIdentity = { sessionId: string; userId: string; displayName: string; isAdmin: boolean };
 
 function sameOrigin(request: Request): boolean {
   const origin = request.headers.get('origin');
@@ -1303,13 +1440,13 @@ function setSessionCookie(c: Parameters<typeof setCookie>[0], token: string): vo
 async function readSession(env: Env, token?: string): Promise<SessionIdentity | null> {
   if (!token) return null;
   const session = await env.DB.prepare(
-    `SELECT s.id AS session_id, u.id AS user_id, u.display_name
+    `SELECT s.id AS session_id, u.id AS user_id, u.display_name, u.role
      FROM user_sessions s JOIN users u ON u.id = s.user_id
      WHERE s.token_hash = ? AND s.expires_at > CURRENT_TIMESTAMP`
-  ).bind(await sha256(token)).first<{ session_id: string; user_id: string; display_name: string }>();
+  ).bind(await sha256(token)).first<{ session_id: string; user_id: string; display_name: string; role: string }>();
   if (!session) return null;
   await env.DB.prepare('UPDATE user_sessions SET last_seen_at = CURRENT_TIMESTAMP WHERE id = ?').bind(session.session_id).run();
-  return { sessionId: session.session_id, userId: session.user_id, displayName: session.display_name };
+  return { sessionId: session.session_id, userId: session.user_id, displayName: session.display_name, isAdmin: session.role === 'admin' };
 }
 
 function normalizeBackfillSince(value?: string): string | undefined {
