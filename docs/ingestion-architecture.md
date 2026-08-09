@@ -19,6 +19,20 @@ FDE Radar は AI ニュースの量を増やすサイトではない。顧客の
 
 日本とグローバルは表示時に別軸で集計し、目標比率をおおむね 50:50 とする。研究・採用・動画は主フィードを占有しない。
 
+## 章別カバレッジ
+
+ニュースの件数ではなく、FDE の仕事を最初から最後まで説明できることを供給設計の単位にする。各 Source は `chapter_targets` で担当する章を宣言し、公開記事は意味判定後に必ず一つの `chapter_id` へ分類する。
+
+| 観点 | 章 |
+|---|---|
+| Customer | 顧客課題、ユースケース、業務プロセス、成果・ROI |
+| Build | Agent、RAG・検索、連携・Connector、Legacy刷新 |
+| Deploy | Cloud・本番化、On-prem・閉域、Data、Identity・権限、Observability、Cost |
+| Govern | Security、Evaluation、Privacy、Regulation、Reliability |
+| Organization | FDEの役割、AI CoE、Change Management、人材・採用、AI-native組織 |
+
+`GET /api/coverage` は24章を欠落なく返し、記事数、供給 Source 数、日本記事数、推奨アクション付き記事数、最新公開日を集計する。章ごとの最低記事数と最低 Source 数を両方満たした場合だけ `healthy`、不足は `thin`、記事または Source がゼロなら `empty` とする。画面のナレッジマップと収集運用はこの状態を共有する。
+
 ## パイプライン
 
 ```text
@@ -58,4 +72,5 @@ AI という語があるだけでは収録しない。少なくとも次の一�
 - 重複イベント率
 - 発見までの時間と重要ソースの鮮度
 - 未分類トピック率
+- 章別の empty / thin / healthy と単一 Source 依存
 - 保存・クリック・行動化率

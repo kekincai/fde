@@ -28,11 +28,11 @@ export type SemanticDecision = {
   rejectionReason: string;
 };
 
-const AI = /\b(ai|artificial intelligence|llm|large language model|generative ai|genai|agentic|gpt|claude|gemini|bedrock|copilot|aip|workers ai)\b|生成AI|人工知能|大規模言語モデル/i;
+const AI = /\b(ai|artificial intelligence|llm|large language model|generative ai|genai|agentic|gpt|claude|gemini|bedrock|copilot|aip|workers ai|mcp)\b|生成AI|人工知能|大規模言語モデル/i;
 const FDE_ROLE = /forward deployed|\bfde\b|fdse|deployment strategist|フォワード.?デプロイド|AI導入エンジニア/i;
 const CUSTOMER = /customer|client|enterprise|public sector|case stud|use case|roi|business process|顧客|企業|行政|導入事例|活用事例|業務|効果/i;
 const DELIVERY = /deploy|production|rollout|adoption|implementation|integration|workflow|migration|legacy|本番|導入|実装|運用|連携|移行|定着/i;
-const CONTROL = /security|governance|privacy|identity|permission|evaluation|evals|observability|reliability|guardrail|安全|ガバナンス|プライバシー|認証|権限|評価|監視|品質/i;
+const CONTROL = /security|governance|privacy|personal data|identity|permission|evaluation|evals|observability|reliability|guardrail|安全|ガバナンス|プライバシー|個人情報|注意喚起|認証|権限|評価|監視|品質/i;
 const BUILD = /agent|rag|retrieval|connector|mcp|tool use|coding agent|エージェント|検索|コネクタ|ツール利用/i;
 const GENERIC_NOISE = /giveaway|coupon|wallpaper|horoscope|sports score|celebrity|ゲーム攻略|プレゼント|占い|芸能|株価だけ/i;
 

@@ -30,6 +30,7 @@ type ApiArticle = Partial<Record<keyof Article, unknown>> & {
 type User = { id: string; displayName: string; isAdmin: boolean };
 type Session = { id: string; created_at: string; last_seen_at: string; expires_at: string; user_agent: string; is_current: number };
 type Overview = { counts?: { total?: number; japan?: number; p0?: number; p1?: number; p2?: number }; last_ingested_at?: string | null };
+type CoverageChapter = { id: string; pillar: string; titleJa: string; questionJa: string; publishedCount: number; sourceCount: number; status: 'healthy' | 'thin' | 'empty' };
 
 function parseList(value?: string, fallback = ''): string[] {
   if (value) try { const parsed = JSON.parse(value); if (Array.isArray(parsed)) return parsed.filter((item): item is string => typeof item === 'string' && Boolean(item)); } catch { /* legacy value */ }
@@ -113,10 +114,12 @@ function SignalRow({ article, saved, selected, section, onSelect, onSave }: { ar
 export default function RadarApp() {
   const [articles, setArticles] = useState<Article[]>([]);
   const [overview, setOverview] = useState<Overview>({});
+  const [coverage, setCoverage] = useState<CoverageChapter[]>([]);
   const [channel, setChannel] = useState<Channel>('action');
   const [region, setRegion] = useState<Region | 'ALL'>('ALL');
   const [pillar, setPillar] = useState('すべて');
   const [topic, setTopic] = useState('すべて');
+  const [chapter, setChapter] = useState('');
   const [priority, setPriority] = useState<Priority | 'ALL'>('ALL');
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState('');
@@ -134,6 +137,7 @@ export default function RadarApp() {
   useEffect(() => {
     fetch('/api/auth/me').then((response) => response.json() as Promise<{ user?: User | null; bookmarkIds?: string[] }>).then((data) => { setUser(data.user ?? null); setSavedIds(data.bookmarkIds ?? []); }).catch(() => undefined);
     fetch('/api/overview').then((response) => response.json() as Promise<Overview>).then(setOverview).catch(() => undefined);
+    fetch('/api/coverage').then((response) => response.json() as Promise<{ chapters?: CoverageChapter[] }>).then((data) => setCoverage(data.chapters ?? [])).catch(() => undefined);
     track('page_view', 'about');
   }, []);
   useEffect(() => { if (view === 'admin' && !user?.isAdmin) setView('radar'); }, [user, view]);
@@ -147,6 +151,7 @@ export default function RadarApp() {
       if (region !== 'ALL') params.set('region', region);
       if (pillar !== 'すべて') params.set('pillar', pillar);
       if (topic !== 'すべて') params.set('layer', topic);
+      if (chapter) params.set('chapter', chapter);
       if (priority !== 'ALL') params.set('priority', priority);
       if (query.trim()) params.set('q', query.trim());
       const endpoint = channel === 'saved' ? `/api/bookmarks?${params}` : `/api/articles?${params}`;
@@ -160,7 +165,7 @@ export default function RadarApp() {
       }).catch((reason) => { if (reason instanceof DOMException && reason.name === 'AbortError') return; setError(reason instanceof Error ? reason.message : '読み込みに失敗しました。'); }).finally(() => setLoading(false));
     }, query ? 280 : 0);
     return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [channel, page, pillar, priority, query, region, topic, user, view]);
+  }, [channel, chapter, page, pillar, priority, query, region, topic, user, view]);
 
   const pageNumbers = useMemo(() => {
     const start = Math.max(1, Math.min(page - 2, pagination.totalPages - 4));
@@ -178,7 +183,7 @@ export default function RadarApp() {
     }
   }
   function go(next: Channel, nextRegion: Region | 'ALL' = 'ALL') {
-    setView('radar'); setChannel(next); setRegion(nextRegion); setPriority('ALL'); setMobileFilters(false); setPage(1);
+    setView('radar'); setChannel(next); setRegion(nextRegion); setPriority('ALL'); setChapter(''); setMobileFilters(false); setPage(1);
     track('section_view', next === 'action' && nextRegion === 'Japan' ? 'japan' : next === 'career' ? 'research' : next);
     window.setTimeout(() => document.getElementById('signals')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0);
   }
@@ -198,10 +203,11 @@ export default function RadarApp() {
     {view === 'admin' ? <AdminDashboard /> : <main id="top">
       <section id="about" className="fde-hero"><div className="hero-copy"><span className="overline">FORWARD DEPLOYED ENGINEERING</span><h1>AIを、現場で使える<br />成果に変える。</h1><p><b>FDE</b> は、顧客の本当の課題を理解し、AIを構築・導入・評価して、現場に定着させる実践の方法です。技術ニュースを眺めるだけでなく、何を確かめ、次にどう動くかまでつなげます。</p><button onClick={() => document.getElementById('signals')?.scrollIntoView({ behavior: 'smooth' })}>今日の判断を見る<Icon name="chevron" /></button></div><div className="hero-definition"><span>FDEの仕事の流れ</span><ol>{[['01','顧客課題','業務と制約を理解する'],['02','構築','小さく作って確かめる'],['03','本番導入','既存の現場へつなぐ'],['04','統制・安全','品質・権限・リスクを守る'],['05','組織・定着','運用を残し、再現可能にする']].map(([step,title,copy]) => <li key={step}><i>{step}</i><div><b>{title}</b><small>{copy}</small></div></li>)}</ol></div></section>
       <section className="radar-purpose"><div className="purpose-title"><span>FDE RADAR</span><h2>このサイトがすること</h2><p>世界と日本のAI導入シグナルを集め、FDEの5つの観点で整理します。</p></div><div><b>01</b><h3>変化を知る</h3><p>公式発表、導入事例、研究、制度、現場の知見を6時間ごとに収集。</p></div><div><b>02</b><h3>次の行動を決める</h3><p>P0・P1・P2に分け、今日対応するか、今週試すか、背景として学ぶかを判断。</p></div><div><b>03</b><h3>判断材料を残す</h3><p>気になる記事を保存し、一次情報と判断根拠を後から確認できます。</p></div></section>
+      <section className="chapter-map"><div className="chapter-map-head"><span className="overline">FDE KNOWLEDGE MAP</span><h2>現場導入を、24の問いで読む</h2><p>大きな分類だけで終わらせず、知りたい問いから一次情報へ進めます。</p></div><div className="chapter-columns">{['Customer', 'Build', 'Deploy', 'Govern', 'Organization'].map((chapterPillar) => <div key={chapterPillar}><h3>{pillarLabels[chapterPillar]}</h3>{coverage.filter((item) => item.pillar === chapterPillar).map((item) => <button key={item.id} className={`${chapter === item.id ? 'active' : ''} status-${item.status}`} onClick={() => { setChapter(chapter === item.id ? '' : item.id); setPillar(chapter === item.id ? 'すべて' : chapterPillar); setChannel('action'); resetPage(); window.setTimeout(() => document.getElementById('signals')?.scrollIntoView({ behavior: 'smooth' }), 0); }}><span>{item.titleJa}<small>{item.questionJa}</small></span><b>{item.publishedCount}</b></button>)}</div>)}</div></section>
       <section id="signals" className="workspace-head"><div><span className="overline">FIELD INTELLIGENCE / {channel.toUpperCase()}</span><h2>{channel === 'saved' ? '保存した判断材料' : channel === 'research' ? '背景を理解する' : region === 'Japan' ? '日本のAI導入シグナル' : '今日のフィールド判断'}</h2><p>{channel === 'saved' ? '後で判断したい情報を、優先度ごとに整理しています。' : '顧客・事業への影響を起点に、次に何を確認・検証するかまで整理します。'}</p></div><div className="update-status"><span className="live-dot" />6時間ごとに自動収集<small>最終更新 {formatDate(overview.last_ingested_at)}</small></div></section>
       <section className="priority-board" aria-label="優先度別の状況">{(['P0', 'P1', 'P2'] as Priority[]).map((key) => <button key={key} className={`priority-card ${priority === key ? 'active' : ''} priority-${key.toLowerCase()}`} onClick={() => { setPriority(priority === key ? 'ALL' : key); resetPage(); }}><span>{key}</span><div><b>{priorityMeta[key].label}</b><small>{priorityMeta[key].description}</small></div><strong>{String(globalCount(key)).padStart(2, '0')}</strong></button>)}</section>
       <button className="mobile-filter-button" onClick={() => setMobileFilters(!mobileFilters)}><Icon name="menu" />絞り込み</button>
-      <section className="intelligence-layout"><aside className={`filter-rail ${mobileFilters ? 'is-open' : ''}`}><div className="filter-group"><span>FDEの観点</span>{pillars.map((item) => <button className={pillar === item ? 'active' : ''} onClick={() => { setPillar(item); resetPage(); }} key={item}>{pillarLabels[item]}</button>)}</div><div className="filter-group"><span>地域</span>{(['ALL', 'Japan', 'Global'] as const).map((item) => <button className={region === item ? 'active' : ''} onClick={() => { setRegion(item); resetPage(); }} key={item}>{item === 'ALL' ? 'すべて' : item === 'Japan' ? '日本' : 'グローバル'}</button>)}</div><div className="filter-group topic-filter"><span>テーマ</span>{topics.map((item) => <button className={topic === item ? 'active' : ''} onClick={() => { setTopic(item); resetPage(); }} key={item}>{item}</button>)}</div><div className="saved-summary"><span>保存済み</span><strong>{String(savedIds.length).padStart(2, '0')}</strong><button onClick={() => go('saved')}>一覧を見る</button></div></aside>
+      <section className="intelligence-layout"><aside className={`filter-rail ${mobileFilters ? 'is-open' : ''}`}><div className="filter-group"><span>FDEの観点</span>{pillars.map((item) => <button className={pillar === item ? 'active' : ''} onClick={() => { setPillar(item); setChapter(''); resetPage(); }} key={item}>{pillarLabels[item]}</button>)}</div>{chapter && <div className="active-chapter"><span>選択中の問い</span><b>{coverage.find((item) => item.id === chapter)?.titleJa}</b><button onClick={() => { setChapter(''); setPillar('すべて'); resetPage(); }}>解除</button></div>}<div className="filter-group"><span>地域</span>{(['ALL', 'Japan', 'Global'] as const).map((item) => <button className={region === item ? 'active' : ''} onClick={() => { setRegion(item); resetPage(); }} key={item}>{item === 'ALL' ? 'すべて' : item === 'Japan' ? '日本' : 'グローバル'}</button>)}</div><div className="filter-group topic-filter"><span>テーマ</span>{topics.map((item) => <button className={topic === item ? 'active' : ''} onClick={() => { setTopic(item); resetPage(); }} key={item}>{item}</button>)}</div><div className="saved-summary"><span>保存済み</span><strong>{String(savedIds.length).padStart(2, '0')}</strong><button onClick={() => go('saved')}>一覧を見る</button></div></aside>
         <div className="intel-list"><div className="list-toolbar"><div><b>{pagination.total}</b> 件のシグナル <small>（{page} / {pagination.totalPages} ページ）</small></div><div><span className="legend-p0" />今日対応<span className="legend-p1" />今週検証<span className="legend-p2" />背景学習</div></div>{loading && <div className="empty-state">情報源からシグナルを読み込んでいます…</div>}{!loading && error && <div className="empty-state is-error">{error}</div>}{!loading && !error && articles.length === 0 && <div className="empty-state"><b>この条件のシグナルはありません。</b><span>絞り込みを変えるか、次回の自動収集をお待ちください。</span></div>}{articles.map((article) => <SignalRow key={article.id} article={article} section={section} saved={savedIds.includes(article.id)} selected={selected === article.id} onSelect={() => selectArticle(article)} onSave={() => toggleSave(article.id)} />)}{pagination.totalPages > 1 && <nav className="pagination" aria-label="ページ送り"><button disabled={page === 1} onClick={() => { setPage(page - 1); document.getElementById('signals')?.scrollIntoView(); }}>前へ</button>{pageNumbers.map((number) => <button key={number} className={page === number ? 'active' : ''} onClick={() => { setPage(number); document.getElementById('signals')?.scrollIntoView(); }}>{number}</button>)}<button disabled={page === pagination.totalPages} onClick={() => { setPage(page + 1); document.getElementById('signals')?.scrollIntoView(); }}>次へ</button></nav>}</div>
       </section>
     </main>}

@@ -14,7 +14,8 @@ import { Hono } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import postgres from 'postgres';
 
-import { collectionStreamFor, sourceRegistry, type ContentType, type FdePillar, type SourceKind, type SourceRecord } from './sourceRegistry';
+import { chapterDefinitions, inferChapter } from './chapters';
+import { chaptersFor, collectionStreamFor, sourceRegistry, type ContentType, type FdePillar, type SourceKind, type SourceRecord } from './sourceRegistry';
 import { evaluateCandidate, reviewWithWorkersAI, type SemanticDecision } from './intelligence';
 
 export type IngestMessage = {
@@ -132,6 +133,7 @@ app.get('/api/articles', async (c) => {
   const pillar = c.req.query('pillar') ?? c.req.query('topic') ?? 'すべて';
   const priority = c.req.query('priority') ?? 'ALL';
   const topicLayer = c.req.query('layer')?.trim() ?? '';
+  const chapter = c.req.query('chapter')?.trim() ?? '';
   const channel = c.req.query('channel') ?? 'action';
   const contentType = c.req.query('type') ?? 'すべて';
   const page = Math.max(Number(c.req.query('page') ?? 1) || 1, 1);
@@ -155,9 +157,10 @@ app.get('/api/articles', async (c) => {
       clauses.push('EXISTS (SELECT 1 FROM json_each(a.topic_layers) WHERE value = ?)');
       values.push(topicLayer);
     }
-    if (channel === 'research') clauses.push("a.content_type IN ('paper', 'report')");
-    if (channel === 'career') clauses.push("a.content_type = 'career'");
-    if (channel === 'action') clauses.push("a.content_type NOT IN ('paper', 'report', 'career')");
+    if (chapter) { clauses.push('a.chapter_id = ?'); values.push(chapter); }
+    if (!chapter && channel === 'research') clauses.push("a.content_type IN ('paper', 'report')");
+    if (!chapter && channel === 'career') clauses.push("a.content_type = 'career'");
+    if (!chapter && channel === 'action') clauses.push("a.content_type NOT IN ('paper', 'report', 'career')");
     if (contentType !== 'すべて') {
       clauses.push('a.content_type = ?');
       values.push(contentType);
@@ -371,10 +374,12 @@ app.get('/api/bookmarks', async (c) => {
   const pillar = c.req.query('pillar') ?? 'すべて';
   const priority = c.req.query('priority') ?? 'ALL';
   const topicLayer = c.req.query('layer')?.trim() ?? '';
+  const chapter = c.req.query('chapter')?.trim() ?? '';
   if (region !== 'ALL') { clauses.push('a.region = ?'); values.push(region); }
   if (pillar !== 'すべて') { clauses.push('a.core_pillar = ?'); values.push(pillar); }
   if (priority !== 'ALL') { clauses.push('a.priority_level = ?'); values.push(priority); }
   if (topicLayer) { clauses.push('EXISTS (SELECT 1 FROM json_each(a.topic_layers) WHERE value = ?)'); values.push(topicLayer); }
+  if (chapter) { clauses.push('a.chapter_id = ?'); values.push(chapter); }
   const searchQuery = query ? buildFtsQuery(query) : '';
   const from = searchQuery
     ? 'user_bookmarks b JOIN articles_fts f ON f.article_id = b.article_id JOIN articles a ON a.id = b.article_id JOIN sources s ON s.id = a.source_id'
@@ -566,6 +571,54 @@ app.get('/api/ingest/status', async (c) => {
   }
 });
 
+app.get('/api/coverage', async (c) => {
+  try {
+    const [articleCoverage, sourceCoverage] = await Promise.all([
+      c.env.DB.prepare(
+        `SELECT chapter_id, COUNT(*) AS published_count,
+                SUM(CASE WHEN region = 'Japan' THEN 1 ELSE 0 END) AS japan_count,
+                SUM(CASE WHEN recommended_action <> '' THEN 1 ELSE 0 END) AS actionable_count,
+                MAX(published_at) AS latest_published_at
+         FROM articles WHERE status = 'published' GROUP BY chapter_id`
+      ).all<{ chapter_id: string; published_count: number; japan_count: number; actionable_count: number; latest_published_at: string | null }>(),
+      c.env.DB.prepare(
+        `SELECT j.value AS chapter_id, COUNT(DISTINCT s.id) AS source_count
+         FROM sources s, json_each(s.chapter_targets) j
+         WHERE s.allowed_fetch = 1 AND json_valid(s.chapter_targets)
+         GROUP BY chapter_id`
+      ).all<{ chapter_id: string; source_count: number }>()
+    ]);
+    const articleMap = new Map(articleCoverage.results.map((row) => [row.chapter_id, row]));
+    const sourceMap = new Map(sourceCoverage.results.map((row) => [row.chapter_id, Number(row.source_count)]));
+    const chapters = chapterDefinitions.map((chapter) => {
+      const articles = articleMap.get(chapter.id);
+      const publishedCount = Number(articles?.published_count ?? 0);
+      const sourceCount = sourceMap.get(chapter.id) ?? 0;
+      return {
+        ...chapter,
+        publishedCount,
+        sourceCount,
+        japanCount: Number(articles?.japan_count ?? 0),
+        actionableCount: Number(articles?.actionable_count ?? 0),
+        latestPublishedAt: articles?.latest_published_at ?? null,
+        status: publishedCount >= chapter.minimumPublished && sourceCount >= chapter.minimumSources
+          ? 'healthy' : publishedCount > 0 && sourceCount > 0 ? 'thin' : 'empty'
+      };
+    });
+    return c.json({
+      chapters,
+      summary: {
+        healthy: chapters.filter((chapter) => chapter.status === 'healthy').length,
+        thin: chapters.filter((chapter) => chapter.status === 'thin').length,
+        empty: chapters.filter((chapter) => chapter.status === 'empty').length,
+        total: chapters.length
+      }
+    });
+  } catch (error) {
+    return c.json({ chapters: [], error: errorMessage(error) }, 503);
+  }
+});
+
 app.post('/api/ingest/dispatch', async (c) => {
   if (!isAuthorized(c.req.raw, c.env)) return c.json({ error: 'Unauthorized' }, 401);
   await syncSourceRegistry(c.env);
@@ -654,6 +707,7 @@ async function readSources(env: Env, sourceIds?: string[], force = false): Promi
           dailyItemCap: registrySource?.dailyItemCap ?? 20,
           includeTerms: registrySource?.includeTerms,
           excludeTerms: registrySource?.excludeTerms,
+          fixedChapter: registrySource?.fixedChapter,
           priority: source.priority,
           pollIntervalMinutes: source.poll_interval_minutes,
           etag: source.etag ?? undefined,
@@ -673,8 +727,8 @@ async function syncSourceRegistry(env: Env): Promise<void> {
       (id, name, homepage, feed_url, api_url, fetch_mode, language, country, source_kind,
        content_type, default_pillar, source_tier, source_weight, min_fde_score, priority,
        poll_interval_minutes, allowed_fetch, parser_version, robots_checked_at, tos_reviewed_at,
-       collection_stream, semantic_policy, daily_item_cap)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '4', ?, ?, ?, ?, ?)
+       collection_stream, semantic_policy, daily_item_cap, chapter_targets)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '5', ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        name = excluded.name, homepage = excluded.homepage, feed_url = excluded.feed_url,
        api_url = excluded.api_url, fetch_mode = excluded.fetch_mode, language = excluded.language,
@@ -684,14 +738,16 @@ async function syncSourceRegistry(env: Env): Promise<void> {
        min_fde_score = excluded.min_fde_score, priority = excluded.priority,
        poll_interval_minutes = excluded.poll_interval_minutes, allowed_fetch = excluded.allowed_fetch,
        collection_stream = excluded.collection_stream, semantic_policy = excluded.semantic_policy,
-       daily_item_cap = excluded.daily_item_cap, parser_version = '4', updated_at = CURRENT_TIMESTAMP`
+       daily_item_cap = excluded.daily_item_cap, chapter_targets = excluded.chapter_targets,
+       parser_version = '5', updated_at = CURRENT_TIMESTAMP`
   ).bind(
     source.id, source.name, source.homepage, source.feedUrl ?? null, source.apiUrl ?? null,
     source.fetchMode, source.language, source.country, source.kind, source.contentType,
     source.defaultPillar, source.sourceTier, source.weight, source.minScore, source.priority,
     source.pollIntervalMinutes, source.enabled === false ? 0 : 1,
     new Date().toISOString().slice(0, 10), new Date().toISOString().slice(0, 10),
-    collectionStreamFor(source), source.semanticPolicy ?? 'required', source.dailyItemCap ?? 20
+    collectionStreamFor(source), source.semanticPolicy ?? 'required', source.dailyItemCap ?? 20,
+    JSON.stringify(chaptersFor(source))
   ));
   for (let index = 0; index < statements.length; index += 20) {
     await env.DB.batch(statements.slice(index, index + 20));
@@ -912,9 +968,13 @@ async function parseHtmlResponse(source: SourceRecord, response: Response): Prom
 async function parseSingleCareerPage(source: SourceRecord, response: Response): Promise<DiscoveredItem[]> {
   let title = '';
   let description = '';
+  let publishedAt = '';
   const rewriter = new HTMLRewriter()
     .on('title', { text(text) { title += text.text; } })
-    .on('meta[name="description"]', { element(element) { description = element.getAttribute('content') ?? ''; } });
+    .on('meta[name="description"]', { element(element) { description = element.getAttribute('content') ?? ''; } })
+    .on('meta[property="article:published_time"]', { element(element) { publishedAt ||= element.getAttribute('content') ?? ''; } })
+    .on('meta[name="date"]', { element(element) { publishedAt ||= element.getAttribute('content') ?? ''; } })
+    .on('time[datetime]', { element(element) { publishedAt ||= element.getAttribute('datetime') ?? ''; } });
   await rewriter.transform(response).arrayBuffer();
   title = cleanText(title);
   description = cleanText(description);
@@ -926,7 +986,7 @@ async function parseSingleCareerPage(source: SourceRecord, response: Response): 
     url: source.homepage,
     title,
     summary: description.slice(0, 300),
-    publishedAt: new Date().toISOString(),
+    publishedAt: safeIsoDate(publishedAt || dateFromTitle(title) || new Date().toISOString()),
     tags: compactTags([source.kind === 'careers' ? 'FDE' : source.defaultPillar, 'AI', ...extractKeywords(haystack)]),
     signalType: source.kind === 'careers' ? '採用・役割' : inferSignalType(haystack),
     location: source.country === 'JP' ? '日本' : inferLocation(haystack),
@@ -1152,7 +1212,7 @@ async function ingestSource(env: Env, source: SourceRecord, options: IngestOptio
              actionability_score = COALESCE(?, actionability_score), client_fit_score = COALESCE(?, client_fit_score),
              why_it_matters = CASE WHEN ? <> '' THEN ? ELSE why_it_matters END,
              recommended_action = CASE WHEN ? <> '' THEN ? ELSE recommended_action END,
-             evidence = CASE WHEN ? <> '' THEN ? ELSE evidence END
+             evidence = CASE WHEN ? <> '' THEN ? ELSE evidence END, chapter_id = ?
            WHERE id = ?`
         ).bind(
           semantic?.decision ?? 'rules', semantic?.confidence ?? 1,
@@ -1162,7 +1222,12 @@ async function ingestSource(env: Env, source: SourceRecord, options: IngestOptio
           semantic?.signalType ?? null, semantic?.relevanceScore ?? null, semantic?.actionabilityScore ?? null,
           semantic?.clientFitScore ?? null, semantic?.whyItMattersJa ?? '', semantic?.whyItMattersJa ?? '',
           semantic?.recommendedActionJa ?? '', semantic?.recommendedActionJa ?? '',
-          semantic?.evidenceJa ?? '', semantic?.evidenceJa ?? '', stored.id
+          semantic?.evidenceJa ?? '', semantic?.evidenceJa ?? '',
+          source.fixedChapter ?? ((item.contentType ?? source.contentType) === 'career'
+            ? 'organization.talent'
+            : inferChapter(semantic?.corePillar ?? intelligence.corePillar,
+              `${item.title} ${item.summary} ${(semantic?.topics ?? intelligence.topicLayers).join(' ')}`)),
+          stored.id
         ).run();
         await recordCandidate(env, source, candidateId, canonicalUrl, contentHash, item, gate, semantic, 'published', stored.id);
         published += 1;

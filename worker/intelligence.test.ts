@@ -43,3 +43,13 @@ test('accepts explicit FDE role evidence with customer delivery scope', () => {
   });
   assert.equal(result.decision, 'publish');
 });
+
+test('accepts an official generative AI privacy warning as governance evidence', () => {
+  const result = evaluateCandidate({ ...source, kind: 'government', semanticPolicy: 'none', minScore: 30 }, {
+    title: '生成AIサービスの利用に関する注意喚起',
+    summary: '個人情報保護委員会が生成AI利用時の個人情報の取扱いを示した。',
+    tags: ['生成AI', '個人情報'], url: 'https://example.com/5'
+  });
+  assert.equal(result.decision, 'publish');
+  assert.ok(result.reasons.includes('control-context'));
+});

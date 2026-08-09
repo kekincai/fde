@@ -7,6 +7,7 @@ AI導入の変化を `Customer → Build → Deploy → Govern → Organization`
 ## 主な機能
 
 - 6時間ごとの定期収集、Workers AI による意味判定、D1/FTS5 検索
+- FDE の全工程を24の問いに分けたナレッジマップと章別フィルター
 - P0（今日対応）・P1（今週検証）・P2（背景学習）の判断レベル
 - 10件単位のサーバーサイドページングと絞り込み
 - メール不要のパスキー登録・ログインと記事保存
@@ -55,14 +56,14 @@ P0 は直近14日以内の、信頼できる情報源にある明確な脆弱性
 
 ## 監視する情報源
 
-Source Registry は日本とグローバルの一次情報、実装メディア、コミュニティ、求人、研究を分離して管理します。
+Source Registry は日本とグローバルの一次情報、実装メディア、コミュニティ、求人、研究を分離し、各 Source が供給できる章も管理します。`GET /api/coverage` では24章ごとの記事数、日本事例数、行動可能な記事数、供給 Source 数を確認できます。
 
-- 上流一次情報: OpenAI News / Platform Changelog、Anthropic、Palantir
-- 実装・クラウド: Vertex AI Release Notes、Microsoft Azure、GitHub、AWS AgentCore、Cloudflare
-- 日本の行政・安全: デジタル庁 Gennai、IPA、経済産業省
+- 上流一次情報: OpenAI News / Customer Stories / Platform Changelog、Claude Customer Stories / Release Notes、Palantir
+- 実装・クラウド: Google Cloud、Vertex AI、Microsoft Azure、GitHub、AWS Architecture / AgentCore、Cloudflare Workers AI / Vectorize
+- 日本の行政・安全: デジタル庁 Gennai・生成AI調達ガイドライン、IPA、経済産業省
 - 日本の企業・技術メディア: Publickey、ITmedia AI+、CodeZine、EnterpriseZine、DevelopersIO、LY、CyberAgent、DeNA、Recruit、NTT DATA
 - 日本の現場共有・求人: Qiita、Zenn、AI Native Careers、TokyoDev、Yahoo!ニュース IT
-- 研究・レポート: FDE 隣接テーマに限定した arXiv、Stanford AI Index
+- 研究・レポート: FDE 隣接テーマに限定した arXiv、Stanford AI Index、NIST AI RMF、OWASP GenAI
 - 動画: OpenAI、Anthropic、Google Cloud、AWS、Cloudflare、Palantir の公式 YouTube Feed
 
 OpenAI の東京 FDE 公式ページは Source Directory に保持していますが、Cloudflare Workers から 403 になるため自動取得を停止しています。アクセス制限は迂回しません。
