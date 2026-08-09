@@ -9,3 +9,4 @@ dist/
 *.log
 .playwright-cli/
 output/
+worker-configuration.d.ts

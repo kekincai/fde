@@ -1,7 +1,17 @@
 /// <reference types="@cloudflare/workers-types" />
 
 import { XMLParser } from 'fast-xml-parser';
+import {
+  generateAuthenticationOptions,
+  generateRegistrationOptions,
+  verifyAuthenticationResponse,
+  verifyRegistrationResponse,
+  type AuthenticationResponseJSON,
+  type AuthenticatorTransportFuture,
+  type RegistrationResponseJSON
+} from '@simplewebauthn/server';
 import { Hono } from 'hono';
+import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import postgres from 'postgres';
 
 import { sourceRegistry, type ContentType, type FdePillar, type SourceKind, type SourceRecord } from './sourceRegistry';
@@ -82,6 +92,8 @@ type FetchFailure = Error & { status?: number; retryAfterSeconds?: number };
 
 const MAX_BODY_BYTES = 6_000_000;
 const USER_AGENT = 'FDE-Radar/0.2 (+https://github.com/kekincai/fde)';
+const SESSION_COOKIE = 'fde_session';
+const SESSION_DAYS = 30;
 const app = new Hono<{ Bindings: Env }>();
 
 const ROLE_PATTERN = /(forward deployed|deployment engineer|deployment engineering|applied ai (engineer|architect)|technical deployment lead|customer deployment|beneficial deployments|フォワード.?デプロイド|AI導入エンジニア|AIソリューションエンジニア)/i;
@@ -98,23 +110,29 @@ const CUSTOMER_PATTERN = /(customer stor|case stud|use case|business process|roi
 app.get('/api/health', (c) => c.json({
   ok: true,
   service: 'ai-fde-radar-api',
+  version: '2026-08-09-passkey-d1',
   architecture: 'Astro + Hono + Workers + D1/FTS5 + Hyperdrive/PostgreSQL + KV + Queues',
   time: new Date().toISOString()
 }));
 
 app.get('/api/config', (c) => c.json({
-  pillars: ['すべて', 'Customer', 'Build', 'Deploy', 'Govern', 'Organization', 'Japan'],
+  pillars: ['すべて', 'Customer', 'Build', 'Deploy', 'Govern', 'Organization'],
   types: ['すべて', 'news', 'blog', 'video', 'paper', 'report', 'release', 'case-study', 'career'],
   regions: ['ALL', 'Japan', 'Global'],
-  audiences: ['business', 'career']
+  priorities: ['ALL', 'P0', 'P1', 'P2'],
+  topics: ['Identity', 'Observability', 'Integration', 'Cost', 'Evaluation', 'Human-in-the-loop', 'Change Management'],
+  channels: ['action', 'research', 'career']
 }));
 
 app.get('/api/articles', async (c) => {
   const query = c.req.query('q')?.trim() ?? '';
   const region = c.req.query('region') ?? 'ALL';
   const pillar = c.req.query('pillar') ?? c.req.query('topic') ?? 'すべて';
+  const priority = c.req.query('priority') ?? 'ALL';
+  const topicLayer = c.req.query('layer')?.trim() ?? '';
+  const channel = c.req.query('channel') ?? 'action';
   const contentType = c.req.query('type') ?? 'すべて';
-  const limit = Math.min(Math.max(Number(c.req.query('limit') ?? 30), 1), 50);
+  const limit = Math.min(Math.max(Number(c.req.query('limit') ?? 60), 1), 100);
   try {
     const clauses = ["a.status = 'published'", 'a.fde_score >= 40'];
     const values: Array<string | number> = [];
@@ -123,9 +141,20 @@ app.get('/api/articles', async (c) => {
       values.push(region);
     }
     if (pillar !== 'すべて') {
-      clauses.push('a.pillar = ?');
+      clauses.push('a.core_pillar = ?');
       values.push(pillar);
     }
+    if (priority !== 'ALL') {
+      clauses.push('a.priority_level = ?');
+      values.push(priority);
+    }
+    if (topicLayer) {
+      clauses.push('EXISTS (SELECT 1 FROM json_each(a.topic_layers) WHERE value = ?)');
+      values.push(topicLayer);
+    }
+    if (channel === 'research') clauses.push("a.content_type IN ('paper', 'report')");
+    if (channel === 'career') clauses.push("a.content_type = 'career'");
+    if (channel === 'action') clauses.push("a.content_type NOT IN ('paper', 'report', 'career')");
     if (contentType !== 'すべて') {
       clauses.push('a.content_type = ?');
       values.push(contentType);
@@ -143,11 +172,8 @@ app.get('/api/articles', async (c) => {
       `SELECT a.*, s.name AS source_name, s.source_kind
        FROM ${from}
        WHERE ${clauses.join(' AND ')}
-       ORDER BY ROW_NUMBER() OVER (
-                  PARTITION BY a.region
-                  ORDER BY a.published_at DESC, a.fde_score DESC
-                ),
-                a.region DESC LIMIT ?`
+       ORDER BY CASE a.priority_level WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 ELSE 2 END,
+                a.priority_score DESC, a.published_at DESC LIMIT ?`
     ).bind(...values).all();
     return c.json({ articles: result.results, source: searchQuery ? 'd1-fts5' : 'd1' }, 200, {
       'Cache-Control': 'public, max-age=30, s-maxage=300'
@@ -165,7 +191,10 @@ app.get('/api/overview', async (c) => {
           SUM(CASE WHEN region = 'Japan' THEN 1 ELSE 0 END) AS japan,
           SUM(CASE WHEN content_type = 'career' THEN 1 ELSE 0 END) AS careers,
           SUM(CASE WHEN content_type = 'paper' THEN 1 ELSE 0 END) AS papers,
-          SUM(CASE WHEN content_type = 'video' THEN 1 ELSE 0 END) AS videos
+          SUM(CASE WHEN content_type = 'video' THEN 1 ELSE 0 END) AS videos,
+          SUM(CASE WHEN priority_level = 'P0' AND content_type NOT IN ('paper', 'report', 'career') THEN 1 ELSE 0 END) AS p0,
+          SUM(CASE WHEN priority_level = 'P1' AND content_type NOT IN ('paper', 'report', 'career') THEN 1 ELSE 0 END) AS p1,
+          SUM(CASE WHEN priority_level = 'P2' AND content_type NOT IN ('paper', 'report', 'career') THEN 1 ELSE 0 END) AS p2
          FROM articles WHERE status = 'published' AND fde_score >= 40`
       ).first(),
       c.env.DB.prepare(
@@ -179,11 +208,187 @@ app.get('/api/overview', async (c) => {
       ).first()
     ]);
     return c.json({ counts, sources: sources.results, ...latest }, 200, {
-      'Cache-Control': 'public, max-age=30, s-maxage=300'
+      'Cache-Control': 'public, max-age=15, s-maxage=60'
     });
   } catch (error) {
     return c.json({ counts: { total: 0, japan: 0, careers: 0 }, sources: [], error: errorMessage(error) }, 503);
   }
+});
+
+app.post('/api/auth/passkey/register/options', async (c) => {
+  if (!sameOrigin(c.req.raw)) return c.json({ error: '不正なリクエストです。' }, 403);
+  const payload = await c.req.json().catch(() => ({})) as { displayName?: string };
+  const displayName = cleanText(payload.displayName ?? '').slice(0, 40);
+  if (!displayName) return c.json({ error: '表示名を入力してください。' }, 400);
+  if (!await allowAuthAttempt(c.env, c.req.raw, 'register')) return c.json({ error: '試行回数が多すぎます。しばらく待ってからお試しください。' }, 429);
+  const userId = crypto.randomUUID();
+  const webauthnUserID = crypto.getRandomValues(new Uint8Array(32));
+  const { rpID } = relyingParty(c.req.raw);
+  const options = await generateRegistrationOptions({
+    rpName: 'FDE Radar', rpID, userName: displayName, userDisplayName: displayName,
+    userID: webauthnUserID, attestationType: 'none', supportedAlgorithmIDs: [-7, -257],
+    authenticatorSelection: { residentKey: 'required', userVerification: 'required' }
+  });
+  const flowId = crypto.randomUUID();
+  await c.env.DB.prepare(
+    `INSERT INTO auth_challenges (id, kind, challenge, user_id, display_name, webauthn_user_id, expires_at)
+     VALUES (?, 'register', ?, ?, ?, ?, ?)`
+  ).bind(flowId, options.challenge, userId, displayName, options.user.id, new Date(Date.now() + 300_000).toISOString()).run();
+  return c.json({ flowId, options, challengeStore: 'd1' });
+});
+
+app.post('/api/auth/passkey/register/verify', async (c) => {
+  if (!sameOrigin(c.req.raw)) return c.json({ error: '不正なリクエストです。' }, 403);
+  const payload = await c.req.json().catch(() => ({})) as { flowId?: string; response?: RegistrationResponseJSON };
+  if (!payload.flowId || !payload.response) return c.json({ error: '登録情報が不足しています。' }, 400);
+  const state = await c.env.DB.prepare(
+    `SELECT challenge, user_id, display_name, webauthn_user_id FROM auth_challenges
+     WHERE id = ? AND kind = 'register' AND expires_at > CURRENT_TIMESTAMP`
+  ).bind(payload.flowId).first<{ challenge: string; user_id: string; display_name: string; webauthn_user_id: string }>();
+  if (!state) return c.json({ error: '登録の有効時間が切れました。もう一度お試しください。' }, 400);
+  const { rpID, origin } = relyingParty(c.req.raw);
+  try {
+    const verification = await verifyRegistrationResponse({ response: payload.response, expectedChallenge: state.challenge, expectedOrigin: origin, expectedRPID: rpID, requireUserVerification: true });
+    if (!verification.verified || !verification.registrationInfo) return c.json({ error: 'パスキーを確認できませんでした。' }, 400);
+    const { credential, credentialDeviceType, credentialBackedUp } = verification.registrationInfo;
+    await c.env.DB.batch([
+      c.env.DB.prepare('INSERT INTO users (id, display_name, webauthn_user_id) VALUES (?, ?, ?)').bind(state.user_id, state.display_name, state.webauthn_user_id),
+      c.env.DB.prepare(
+        `INSERT INTO passkey_credentials (id, user_id, public_key, counter, transports, device_type, backed_up)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      ).bind(credential.id, state.user_id, credential.publicKey.buffer, credential.counter, JSON.stringify(credential.transports ?? []), credentialDeviceType, credentialBackedUp ? 1 : 0),
+      c.env.DB.prepare('DELETE FROM auth_challenges WHERE id = ?').bind(payload.flowId)
+    ]);
+    const session = await createSession(c.env, state.user_id, c.req.header('user-agent') ?? '');
+    setSessionCookie(c, session.token);
+    return c.json({ user: { id: state.user_id, displayName: state.display_name }, bookmarkIds: [] }, 201);
+  } catch (error) { return c.json({ error: `パスキーを登録できませんでした。${errorMessage(error)}` }, 400); }
+});
+
+app.post('/api/auth/passkey/login/options', async (c) => {
+  if (!sameOrigin(c.req.raw)) return c.json({ error: '不正なリクエストです。' }, 403);
+  if (!await allowAuthAttempt(c.env, c.req.raw, 'login')) return c.json({ error: '試行回数が多すぎます。しばらく待ってからお試しください。' }, 429);
+  const { rpID } = relyingParty(c.req.raw);
+  const options = await generateAuthenticationOptions({ rpID, userVerification: 'required' });
+  const flowId = crypto.randomUUID();
+  await c.env.DB.prepare(
+    `INSERT INTO auth_challenges (id, kind, challenge, expires_at) VALUES (?, 'login', ?, ?)`
+  ).bind(flowId, options.challenge, new Date(Date.now() + 300_000).toISOString()).run();
+  return c.json({ flowId, options });
+});
+
+app.post('/api/auth/passkey/login/verify', async (c) => {
+  if (!sameOrigin(c.req.raw)) return c.json({ error: '不正なリクエストです。' }, 403);
+  const payload = await c.req.json().catch(() => ({})) as { flowId?: string; response?: AuthenticationResponseJSON };
+  if (!payload.flowId || !payload.response) return c.json({ error: 'ログイン情報が不足しています。' }, 400);
+  const challengeRow = await c.env.DB.prepare(
+    `SELECT challenge FROM auth_challenges WHERE id = ? AND kind = 'login' AND expires_at > CURRENT_TIMESTAMP`
+  ).bind(payload.flowId).first<{ challenge: string }>();
+  if (!challengeRow) return c.json({ error: 'ログインの有効時間が切れました。もう一度お試しください。' }, 400);
+  const credential = await c.env.DB.prepare(
+    `SELECT p.id, p.user_id, p.public_key, p.counter, p.transports, u.display_name
+     FROM passkey_credentials p JOIN users u ON u.id = p.user_id WHERE p.id = ?`
+  ).bind(payload.response.id).first<{ id: string; user_id: string; public_key: ArrayBuffer; counter: number; transports: string; display_name: string }>();
+  if (!credential) return c.json({ error: 'このパスキーは登録されていません。' }, 401);
+  const { rpID, origin } = relyingParty(c.req.raw);
+  try {
+    const verification = await verifyAuthenticationResponse({
+      response: payload.response, expectedChallenge: challengeRow.challenge, expectedOrigin: origin, expectedRPID: rpID, requireUserVerification: true,
+      credential: { id: credential.id, publicKey: new Uint8Array(credential.public_key), counter: credential.counter, transports: JSON.parse(credential.transports) as AuthenticatorTransportFuture[] }
+    });
+    if (!verification.verified) return c.json({ error: 'パスキーを確認できませんでした。' }, 401);
+    await c.env.DB.prepare('UPDATE passkey_credentials SET counter = ?, last_used_at = CURRENT_TIMESTAMP WHERE id = ?').bind(verification.authenticationInfo.newCounter, credential.id).run();
+    await c.env.DB.prepare('DELETE FROM auth_challenges WHERE id = ?').bind(payload.flowId).run();
+    const session = await createSession(c.env, credential.user_id, c.req.header('user-agent') ?? '');
+    setSessionCookie(c, session.token);
+    const bookmarks = await c.env.DB.prepare('SELECT article_id FROM user_bookmarks WHERE user_id = ?').bind(credential.user_id).all<{ article_id: string }>();
+    return c.json({ user: { id: credential.user_id, displayName: credential.display_name }, bookmarkIds: bookmarks.results.map((row) => row.article_id) });
+  } catch (error) { return c.json({ error: `ログインできませんでした。${errorMessage(error)}` }, 401); }
+});
+
+app.get('/api/auth/me', async (c) => {
+  const session = await readSession(c.env, getCookie(c, SESSION_COOKIE));
+  if (!session) return c.json({ user: null, bookmarkIds: [] });
+  const bookmarks = await c.env.DB.prepare('SELECT article_id FROM user_bookmarks WHERE user_id = ? ORDER BY created_at DESC').bind(session.userId).all<{ article_id: string }>();
+  return c.json({ user: { id: session.userId, displayName: session.displayName }, bookmarkIds: bookmarks.results.map((row) => row.article_id) });
+});
+
+app.post('/api/auth/logout', async (c) => {
+  if (!sameOrigin(c.req.raw)) return c.json({ error: '不正なリクエストです。' }, 403);
+  const token = getCookie(c, SESSION_COOKIE);
+  if (token) await c.env.DB.prepare('DELETE FROM user_sessions WHERE token_hash = ?').bind(await sha256(token)).run();
+  deleteCookie(c, SESSION_COOKIE, { path: '/' });
+  return c.json({ ok: true });
+});
+
+app.get('/api/auth/sessions', async (c) => {
+  const currentToken = getCookie(c, SESSION_COOKIE);
+  const session = await readSession(c.env, currentToken);
+  if (!session) return c.json({ error: 'ログインが必要です。' }, 401);
+  const sessions = await c.env.DB.prepare(
+    `SELECT id, created_at, last_seen_at, expires_at, user_agent,
+            CASE WHEN token_hash = ? THEN 1 ELSE 0 END AS is_current
+     FROM user_sessions WHERE user_id = ? AND expires_at > CURRENT_TIMESTAMP
+     ORDER BY last_seen_at DESC`
+  ).bind(await sha256(currentToken!), session.userId).all();
+  return c.json({ sessions: sessions.results });
+});
+
+app.delete('/api/auth/sessions/:id', async (c) => {
+  if (!sameOrigin(c.req.raw)) return c.json({ error: '不正なリクエストです。' }, 403);
+  const currentToken = getCookie(c, SESSION_COOKIE);
+  const session = await readSession(c.env, currentToken);
+  if (!session) return c.json({ error: 'ログインが必要です。' }, 401);
+  const target = await c.env.DB.prepare('SELECT token_hash FROM user_sessions WHERE id = ? AND user_id = ?').bind(c.req.param('id'), session.userId).first<{ token_hash: string }>();
+  if (!target) return c.json({ error: 'セッションが見つかりません。' }, 404);
+  await c.env.DB.prepare('DELETE FROM user_sessions WHERE id = ? AND user_id = ?').bind(c.req.param('id'), session.userId).run();
+  if (target.token_hash === await sha256(currentToken!)) deleteCookie(c, SESSION_COOKIE, { path: '/' });
+  return c.json({ ok: true });
+});
+
+app.get('/api/bookmarks', async (c) => {
+  const session = await readSession(c.env, getCookie(c, SESSION_COOKIE));
+  if (!session) return c.json({ error: 'ログインが必要です。' }, 401);
+  const rows = await c.env.DB.prepare(
+    `SELECT a.*, s.name AS source_name, s.source_kind, b.created_at AS bookmarked_at
+     FROM user_bookmarks b JOIN articles a ON a.id = b.article_id JOIN sources s ON s.id = a.source_id
+     WHERE b.user_id = ? ORDER BY CASE a.priority_level WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 ELSE 2 END, b.created_at DESC`
+  ).bind(session.userId).all();
+  return c.json({ articles: rows.results });
+});
+
+app.put('/api/bookmarks/:articleId', async (c) => {
+  if (!sameOrigin(c.req.raw)) return c.json({ error: '不正なリクエストです。' }, 403);
+  const session = await readSession(c.env, getCookie(c, SESSION_COOKIE));
+  if (!session) return c.json({ error: 'ログインが必要です。' }, 401);
+  const articleId = c.req.param('articleId');
+  const exists = await c.env.DB.prepare("SELECT id FROM articles WHERE id = ? AND status = 'published'").bind(articleId).first();
+  if (!exists) return c.json({ error: '記事が見つかりません。' }, 404);
+  await c.env.DB.batch([
+    c.env.DB.prepare('INSERT OR IGNORE INTO user_bookmarks (user_id, article_id) VALUES (?, ?)').bind(session.userId, articleId),
+    c.env.DB.prepare("INSERT INTO user_actions (id, user_id, article_id, action) VALUES (?, ?, ?, 'saved')").bind(crypto.randomUUID(), session.userId, articleId)
+  ]);
+  return c.json({ saved: true });
+});
+
+app.delete('/api/bookmarks/:articleId', async (c) => {
+  if (!sameOrigin(c.req.raw)) return c.json({ error: '不正なリクエストです。' }, 403);
+  const session = await readSession(c.env, getCookie(c, SESSION_COOKIE));
+  if (!session) return c.json({ error: 'ログインが必要です。' }, 401);
+  const articleId = c.req.param('articleId');
+  await c.env.DB.batch([
+    c.env.DB.prepare('DELETE FROM user_bookmarks WHERE user_id = ? AND article_id = ?').bind(session.userId, articleId),
+    c.env.DB.prepare("INSERT INTO user_actions (id, user_id, article_id, action) VALUES (?, ?, ?, 'unsaved')").bind(crypto.randomUUID(), session.userId, articleId)
+  ]);
+  return c.json({ saved: false });
+});
+
+app.post('/api/articles/:articleId/open', async (c) => {
+  if (!sameOrigin(c.req.raw)) return c.json({ ok: false }, 403);
+  const session = await readSession(c.env, getCookie(c, SESSION_COOKIE));
+  if (session) await c.env.DB.prepare("INSERT INTO user_actions (id, user_id, article_id, action) VALUES (?, ?, ?, 'opened')")
+    .bind(crypto.randomUUID(), session.userId, c.req.param('articleId')).run().catch(() => undefined);
+  return c.json({ ok: true });
 });
 
 app.get('/api/ingest/status', async (c) => {
@@ -575,9 +780,6 @@ async function ingestSource(env: Env, source: SourceRecord, options: IngestOptio
   const runId = crypto.randomUUID();
   try {
     const result = await fetchSourceItems(source, options);
-    if (!result.meta.notModified && options.mode !== 'backfill') {
-      await env.DB.prepare("UPDATE articles SET status = 'legacy' WHERE source_id = ?").bind(source.id).run();
-    }
     let unique = 0;
     for (const item of result.items) {
       const canonicalUrl = normalizeUrl(item.url);
@@ -591,6 +793,7 @@ async function ingestSource(env: Env, source: SourceRecord, options: IngestOptio
       const contentHash = await sha256(`${item.title}\n${item.summary}\n${item.tags.join(' ')}`);
       const searchTokensJa = tokenizeJapanese(`${item.title} ${item.summary} ${item.summaryJa} ${item.tags.join(' ')} ${item.location} ${item.sector} ${item.pillar} ${item.subtopic}`);
       const impacts = inferImpactTags(source, item);
+      const intelligence = inferIntelligence(source, item);
       const stored = await env.DB.prepare(
         `INSERT INTO articles
         (id, canonical_url, canonical_url_hash, external_item_id, source_id, title, title_normalized,
@@ -655,6 +858,23 @@ async function ingestSource(env: Env, source: SourceRecord, options: IngestOptio
         JSON.stringify(impacts.engineering), contentHash
       ).first<{ id: string }>();
       if (stored?.id) {
+        const seenAt = new Date().toISOString();
+        await env.DB.prepare(
+          `UPDATE articles SET core_pillar = ?, japan_lens = ?, topic_layers = ?, affected_stack = ?,
+             priority_level = ?, recommended_action = ?, evidence = ?, relevance_score = ?,
+             actionability_score = ?, authority_score = ?, novelty_score = ?, client_fit_score = ?,
+             priority_score = ?, published_at_original = ?,
+             first_seen_at = CASE WHEN first_seen_at = '' THEN COALESCE(discovered_at, created_at) ELSE first_seen_at END,
+             last_seen_at = ?, source_updated_at = ?, crawl_run_at = ?, time_confidence = ?, dedup_confidence = 1
+           WHERE id = ?`
+        ).bind(
+          intelligence.corePillar, intelligence.japanLens, JSON.stringify(intelligence.topicLayers),
+          JSON.stringify(intelligence.affectedStack), intelligence.priorityLevel, intelligence.recommendedAction,
+          intelligence.evidence, intelligence.relevanceScore, intelligence.actionabilityScore,
+          intelligence.authorityScore, intelligence.noveltyScore, intelligence.clientFitScore,
+          intelligence.priorityScore, item.publishedAt, seenAt, item.publishedAt, seenAt,
+          intelligence.timeConfidence, stored.id
+        ).run();
         await env.DB.prepare('DELETE FROM articles_fts WHERE article_id = ?').bind(stored.id).run();
         await env.DB.prepare(
           'INSERT INTO articles_fts (article_id, title, summary, tags, search_tokens_ja) VALUES (?, ?, ?, ?, ?)'
@@ -709,6 +929,89 @@ function enrichItem(source: SourceRecord, item: DiscoveredItem): DiscoveredItem 
     contentType: source.contentType,
     summaryJa: makeSummaryJa(source, item, pillar, subtopic),
     summaryZh: makeSummaryZh(source, item, pillar, subtopic)
+  };
+}
+
+type Intelligence = {
+  corePillar: Exclude<FdePillar, 'Japan'>;
+  japanLens: string;
+  topicLayers: string[];
+  affectedStack: string[];
+  priorityLevel: 'P0' | 'P1' | 'P2';
+  recommendedAction: string;
+  evidence: string;
+  relevanceScore: number;
+  actionabilityScore: number;
+  authorityScore: number;
+  noveltyScore: number;
+  clientFitScore: number;
+  priorityScore: number;
+  timeConfidence: number;
+};
+
+function inferIntelligence(source: SourceRecord, item: DiscoveredItem): Intelligence {
+  const text = `${item.title} ${item.summary} ${item.tags.join(' ')} ${item.subtopic ?? ''}`;
+  const rawPillar = item.pillar ?? source.defaultPillar;
+  let corePillar: Intelligence['corePillar'] = rawPillar === 'Japan'
+    ? (GOVERN_PATTERN.test(text) ? 'Govern' : CUSTOMER_PATTERN.test(text) ? 'Customer' : 'Deploy')
+    : rawPillar;
+  if (!['Customer', 'Build', 'Deploy', 'Govern', 'Organization'].includes(corePillar)) corePillar = 'Customer';
+  const topicLayers = compactTags([
+    /(identity|permission|auth|認証|権限)/i.test(text) ? 'Identity' : '',
+    /(observab|monitor|telemetry|監視|可観測)/i.test(text) ? 'Observability' : '',
+    /(integrat|connector|連携|統合)/i.test(text) ? 'Integration' : '',
+    /(cost|roi|価格|コスト)/i.test(text) ? 'Cost' : '',
+    /(eval|benchmark|評価|品質)/i.test(text) ? 'Evaluation' : '',
+    /(human.in.the.loop|human oversight|人間|承認)/i.test(text) ? 'Human-in-the-loop' : '',
+    /(change management|adoption|定着|組織変革)/i.test(text) ? 'Change Management' : '',
+    item.subtopic || 'AI Delivery'
+  ]);
+  const affectedStack = compactTags([
+    /agent/i.test(text) ? 'AI Agent' : '',
+    /(rag|retrieval)/i.test(text) ? 'RAG' : '',
+    /(database|data platform|データベース)/i.test(text) ? 'Data Platform' : '',
+    /cloud/i.test(text) ? 'Cloud' : '',
+    /(model|モデル)/i.test(text) ? 'Model' : '',
+    /(identity|auth|認証|権限)/i.test(text) ? 'IAM' : '',
+    /(observab|monitor|telemetry|監視)/i.test(text) ? 'Observability' : ''
+  ]);
+  if (!affectedStack.length) affectedStack.push('Delivery Process');
+
+  const urgentSecurity = /(vulnerab|critical cve|data breach|actively exploited|脆弱性|侵害|情報漏えい)/i.test(text);
+  const urgentChange = /(breaking change|deprecated|end.of.life|service termination|提供終了|破壊的変更)/i.test(text);
+  const operational = /(production|deploy|identity|permission|observab|integrat|connector|cost|case stud|rollout|本番|導入|運用|認証|権限|監視|連携|事例)/i.test(text);
+  const background = ['paper', 'report', 'career'].includes(item.contentType ?? source.contentType);
+  const ageDays = Math.max(0, (Date.now() - Date.parse(item.publishedAt)) / 86_400_000);
+  const authoritative = ['official', 'platform', 'government', 'media'].includes(source.kind);
+  const priorityLevel: Intelligence['priorityLevel'] = background ? 'P2' : (urgentSecurity || urgentChange) && ageDays <= 14 && authoritative && source.contentType !== 'video' ? 'P0' : operational ? 'P1' : 'P2';
+  let recommendedAction = '';
+  if (priorityLevel === 'P0' && urgentSecurity) recommendedAction = '影響を受ける構成と適用済み対策を今日中に確認する';
+  else if (priorityLevel === 'P0' && /(deprecat|end.of.life|sunset|廃止|提供終了)/i.test(text)) recommendedAction = '利用中のバージョンと移行期限を今日中に確認する';
+  else if (priorityLevel === 'P0') recommendedAction = '対象範囲と期限を確認し、必要なら対応チケットを起票する';
+  else if (topicLayers.includes('Identity')) recommendedAction = '今週、権限設計と認証フローを検証する';
+  else if (topicLayers.includes('Observability')) recommendedAction = '今週、既存の監視項目との不足を確認する';
+  else if (topicLayers.includes('Cost')) recommendedAction = '今週、現行利用量で費用の基準値を試算する';
+  else if (topicLayers.includes('Integration')) recommendedAction = '今週、対象コネクターを検証環境で接続する';
+  else if (topicLayers.includes('Evaluation')) recommendedAction = '今週の評価計画に判定基準を追加する';
+  else if (priorityLevel === 'P1') recommendedAction = '今週の検証候補に追加し、自社環境で成立条件を確かめる';
+
+  const relevanceScore = Math.min(100, item.fdeScore);
+  const actionabilityScore = priorityLevel === 'P0' ? 95 : priorityLevel === 'P1' ? 75 : 30;
+  const authorityScore = Math.min(100, source.weight);
+  const noveltyScore = ageDays <= 7 ? 95 : ageDays <= 30 ? 75 : 45;
+  const clientFitScore = background ? 35 : CUSTOMER_PATTERN.test(text) || operational ? 80 : 55;
+  const priorityScore = Math.round(relevanceScore * .25 + actionabilityScore * .3 + authorityScore * .2 + noveltyScore * .1 + clientFitScore * .15);
+  const japanLens = source.country !== 'JP' ? ''
+    : source.kind === 'government' ? (/(regulat|policy|規制|指針|ガイドライン)/i.test(text) ? 'Regulation' : 'Government')
+      : source.kind === 'community' || source.kind === 'careers' ? 'Engineering Community'
+        : CUSTOMER_PATTERN.test(text) ? 'Case Study' : 'Enterprise';
+  return {
+    corePillar, japanLens, topicLayers, affectedStack, priorityLevel, recommendedAction,
+    evidence: priorityLevel === 'P0'
+      ? '公式情報の緊急性キーワードと公開時刻に基づく自動判定'
+      : priorityLevel === 'P1' ? '本番導入・運用パターンとの一致に基づく自動判定' : '背景理解・中長期学習向けとして自動分類',
+    relevanceScore, actionabilityScore, authorityScore, noveltyScore, clientFitScore, priorityScore,
+    timeConfidence: source.fetchMode === 'api' || source.fetchMode === 'rss' ? .9 : .55
   };
 }
 
@@ -935,6 +1238,8 @@ async function markSourceFailure(env: Env, source: SourceRecord, failure: FetchF
 }
 
 async function dispatchSources(env: Env): Promise<void> {
+  await env.DB.prepare('DELETE FROM auth_challenges WHERE expires_at <= CURRENT_TIMESTAMP').run().catch(() => undefined);
+  await env.DB.prepare('DELETE FROM user_sessions WHERE expires_at <= CURRENT_TIMESTAMP').run().catch(() => undefined);
   await syncSourceRegistry(env);
   const sources = await readSources(env);
   if (!sources.length) return;
@@ -945,6 +1250,66 @@ async function dispatchSources(env: Env): Promise<void> {
 function isAuthorized(request: Request, env: Env): boolean {
   if (!env.INGEST_TOKEN) return true;
   return request.headers.get('authorization') === `Bearer ${env.INGEST_TOKEN}`;
+}
+
+type SessionIdentity = { sessionId: string; userId: string; displayName: string };
+
+function sameOrigin(request: Request): boolean {
+  const origin = request.headers.get('origin');
+  if (!origin) return false;
+  try { return new URL(origin).host === new URL(request.url).host; } catch { return false; }
+}
+
+async function allowAuthAttempt(env: Env, request: Request, action: string): Promise<boolean> {
+  const ip = request.headers.get('cf-connecting-ip') ?? 'local';
+  const key = `auth-rate:${await sha256(`${ip}:${action}`)}`;
+  const count = Number(await env.CACHE.get(key) ?? '0');
+  if (count >= 10) return false;
+  await env.CACHE.put(key, String(count + 1), { expirationTtl: 600 });
+  return true;
+}
+
+function randomBase64(bytes: number): string {
+  const value = crypto.getRandomValues(new Uint8Array(bytes));
+  return bytesToBase64(value);
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function relyingParty(request: Request): { rpID: string; origin: string } {
+  const url = new URL(request.url);
+  return { rpID: url.hostname, origin: url.origin };
+}
+
+async function createSession(env: Env, userId: string, userAgent: string): Promise<{ token: string }> {
+  const token = randomBase64(32).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+  const expiresAt = new Date(Date.now() + SESSION_DAYS * 86_400_000).toISOString();
+  await env.DB.prepare(
+    'INSERT INTO user_sessions (id, user_id, token_hash, expires_at, user_agent) VALUES (?, ?, ?, ?, ?)'
+  ).bind(crypto.randomUUID(), userId, await sha256(token), expiresAt, userAgent.slice(0, 240)).run();
+  return { token };
+}
+
+function setSessionCookie(c: Parameters<typeof setCookie>[0], token: string): void {
+  setCookie(c, SESSION_COOKIE, token, {
+    httpOnly: true, secure: true, sameSite: 'Lax', path: '/', maxAge: SESSION_DAYS * 86_400
+  });
+}
+
+async function readSession(env: Env, token?: string): Promise<SessionIdentity | null> {
+  if (!token) return null;
+  const session = await env.DB.prepare(
+    `SELECT s.id AS session_id, u.id AS user_id, u.display_name
+     FROM user_sessions s JOIN users u ON u.id = s.user_id
+     WHERE s.token_hash = ? AND s.expires_at > CURRENT_TIMESTAMP`
+  ).bind(await sha256(token)).first<{ session_id: string; user_id: string; display_name: string }>();
+  if (!session) return null;
+  await env.DB.prepare('UPDATE user_sessions SET last_seen_at = CURRENT_TIMESTAMP WHERE id = ?').bind(session.session_id).run();
+  return { sessionId: session.session_id, userId: session.user_id, displayName: session.display_name };
 }
 
 function normalizeBackfillSince(value?: string): string | undefined {
