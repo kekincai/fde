@@ -36,7 +36,7 @@ export default function RadarHeader({ view, channel, query, user, onHome, onAbou
       <div className="header-actions">
         {view === 'radar' && <label className="header-search"><Icon name="search" size={17} /><input value={query} onChange={(event) => onQuery(event.target.value)} placeholder="企業・技術・課題を検索" /></label>}
         {view === 'radar' && <button className="mobile-search-button" onClick={onMobileSearch} aria-label="検索を開く"><Icon name="search" size={18} /></button>}
-        <button className="account-button" onClick={onAccount}><Icon name="user" size={18} /><span>{user ? user.displayName : 'ログイン'}</span></button>
+        <button className="account-button" onClick={onAccount} aria-label={user ? `${user.displayName}のアカウント` : 'ログイン・新規登録'}><Icon name="user" size={18} /><span>{user ? user.displayName : 'ログイン'}</span></button>
       </div>
     </header>
   </>;
