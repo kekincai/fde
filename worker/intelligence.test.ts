@@ -53,3 +53,27 @@ test('accepts an official generative AI privacy warning as governance evidence',
   assert.equal(result.decision, 'publish');
   assert.ok(result.reasons.includes('control-context'));
 });
+
+test('recognizes ChatGPT and Codex customer workflow evidence', () => {
+  const result = evaluateCandidate({ ...source, country: 'GLOBAL', kind: 'official' }, {
+    title: 'How a customer uses ChatGPT Work',
+    summary: 'The company used Codex to compress a production workflow from weeks to days.',
+    tags: [], url: 'https://example.com/6'
+  });
+  assert.equal(result.decision, 'review');
+  assert.ok(result.reasons.includes('customer-context'));
+  assert.ok(result.reasons.includes('delivery-context'));
+});
+
+test('accepts an official Japanese AI guideline as governance evidence', () => {
+  const result = evaluateCandidate({
+    ...source, kind: 'government', semanticPolicy: 'none', minScore: 35,
+    fixedChapter: 'govern.regulation'
+  }, {
+    title: 'AI事業者ガイドライン（METI/経済産業省）',
+    summary: 'AI事業者向けの公式ガイドラインです。',
+    tags: ['AI'], url: 'https://example.com/7'
+  });
+  assert.equal(result.decision, 'publish');
+  assert.ok(result.reasons.includes('control-context'));
+});

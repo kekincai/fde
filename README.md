@@ -535,6 +535,18 @@ flowchart TD
 - `/api/coverage`: 24章の `healthy / thin / empty`
 - 管理画面: page view、記事 open、保存、Source 品質
 
+### 失敗時のメール通知
+
+Workers Logs は `wrangler.toml` の `[observability]` で有効化しています。収集処理は検索しやすい構造化 event を出力します。
+
+| event | 意味 | 推奨する通知条件 |
+|---|---|---|
+| `ingest_source_manual_review` | 401 / 403 など、自動再試行しない Source 障害 | 1件で通知 |
+| `ingest_batch_retry` | 429、5xx、接続失敗などの一時障害 | 同一時間帯に複数回で通知 |
+| `ingest_archive_failed` | PostgreSQL / Hyperdrive の任意 archive 障害 | 継続時に通知。D1公開処理とは分離 |
+
+Cloudflare Dashboard の Worker `fde-radar` → Observability → Alerts で上記 event を条件にし、通知先を Email に設定します。Free plan でもメール通知を利用できます。403 は Queue 内で重複 retry せず7日 backoff するため、同じ恒久障害でメールが連続送信されません。
+
 ### 毎週見るもの
 
 - Source 別の発見数、Hard Gate 除外、AI審査、公開、重複、AIエラー

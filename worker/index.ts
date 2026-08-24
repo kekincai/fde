@@ -15,6 +15,7 @@ import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import postgres from 'postgres';
 
 import { chapterDefinitions, inferChapter } from './chapters';
+import { FETCH_USER_AGENT, isPermanentFetchFailure, sourceBackoffSeconds } from './fetchPolicy';
 import { chaptersFor, collectionStreamFor, sourceRegistry, type ContentType, type FdePillar, type SourceKind, type SourceRecord } from './sourceRegistry';
 import { evaluateCandidate, reviewWithWorkersAI, type SemanticDecision } from './intelligence';
 
@@ -94,13 +95,12 @@ type FetchMeta = {
 type FetchFailure = Error & { status?: number; retryAfterSeconds?: number };
 
 const MAX_BODY_BYTES = 6_000_000;
-const USER_AGENT = 'FDE-Radar/0.2 (+https://github.com/kekincai/fde)';
 const SESSION_COOKIE = 'fde_session';
 const SESSION_DAYS = 30;
 const app = new Hono<{ Bindings: Env }>();
 
 const ROLE_PATTERN = /(forward deployed|deployment engineer|deployment engineering|applied ai (engineer|architect)|technical deployment lead|customer deployment|beneficial deployments|フォワード.?デプロイド|AI導入エンジニア|AIソリューションエンジニア)/i;
-const AI_PATTERN = /\b(ai|artificial intelligence|llm|large language model|generative ai|genai|agentic|gpt|claude|gemini|bedrock|copilot|aip|workers ai)\b|生成AI|人工知能/i;
+const AI_PATTERN = /\b(ai|artificial intelligence|llm|large language model|generative ai|genai|agentic|gpt|chatgpt|codex|claude|gemini|bedrock|copilot|aip|workers ai)\b|生成AI|人工知能/i;
 const FIELD_PATTERN = /(customer|client|enterprise|government|public sector|現場|顧客|企業)/i;
 const DELIVERY_PATTERN = /(deploy|deployment|production|rollout|adoption|implementation|integrat|workflow|pilot|本番|導入|実装|運用)/i;
 const QUALITY_PATTERN = /(eval|evaluation|reliability|observability|guardrail|security|governance|safety|品質|評価|安全|ガバナンス)/i;
@@ -668,17 +668,18 @@ app.post('/api/ingest/backfill', async (c) => {
 async function readSources(env: Env, sourceIds?: string[], force = false): Promise<SourceRecord[]> {
   const now = new Date().toISOString();
   try {
-    const dueClause = force ? '' : "AND (last_success_at IS NULL OR datetime(last_success_at, '+' || poll_interval_minutes || ' minutes') <= datetime(?))";
+    const eligibilityClause = force ? '' : `AND (backoff_until IS NULL OR backoff_until <= ?)
+      AND (last_success_at IS NULL OR datetime(last_success_at, '+' || poll_interval_minutes || ' minutes') <= datetime(?))`;
     const statement = env.DB.prepare(
       `SELECT id, name, homepage, feed_url, api_url, fetch_mode, language, country, source_kind,
               content_type, default_pillar, source_tier, source_weight, min_fde_score,
               priority, poll_interval_minutes, etag, last_modified, consecutive_failures, backoff_until
        FROM sources
-       WHERE allowed_fetch = 1 AND (backoff_until IS NULL OR backoff_until <= ?) ${dueClause}
+       WHERE allowed_fetch = 1 ${eligibilityClause}
        ORDER BY priority DESC`
     );
     const result = force
-      ? await statement.bind(now).all<DbSourceRow>()
+      ? await statement.all<DbSourceRow>()
       : await statement.bind(now, now).all<DbSourceRow>();
     return result.results
       .filter((source) => !sourceIds?.length || sourceIds.includes(source.id))
@@ -795,7 +796,7 @@ async function fetchSourceItems(source: SourceRecord, options: IngestOptions): P
 async function fetchWithPolicy(source: SourceRecord, url: string, unconditional = false): Promise<{ response: Response; etag: string | null; lastModified: string | null; notModified?: boolean }> {
   const headers = new Headers({
     accept: 'application/atom+xml, application/rss+xml, application/xml, text/xml, application/json, text/html',
-    'user-agent': USER_AGENT
+    'user-agent': FETCH_USER_AGENT
   });
   if (!unconditional && source.etag) headers.set('if-none-match', source.etag);
   if (!unconditional && source.lastModified) headers.set('if-modified-since', source.lastModified);
@@ -1254,7 +1255,16 @@ async function ingestSource(env: Env, source: SourceRecord, options: IngestOptio
       startedAt, new Date().toISOString(), options.mode, options.page ?? null, options.since ?? null
     ).run();
     if (options.mode !== 'backfill') await markSourceSuccess(env, source, result.meta);
-    if (!result.meta.notModified) await persistArchive(env, source, result.items, result.meta.mode, startedAt);
+    if (!result.meta.notModified) {
+      await persistArchive(env, source, result.items, result.meta.mode, startedAt).catch(async (error) => {
+        const detail = {
+          event: 'ingest_archive_failed', sourceId: source.id,
+          message: errorMessage(error), occurredAt: new Date().toISOString()
+        };
+        console.error(detail);
+        await env.CACHE.put(`ingest:archive-error:${source.id}`, JSON.stringify(detail), { expirationTtl: 604_800 }).catch(() => undefined);
+      });
+    }
     return { discovered: result.items.length, unique };
   } catch (error) {
     const failure = error as FetchFailure;
@@ -1580,13 +1590,13 @@ async function persistArchive(env: Env, source: SourceRecord, items: DiscoveredI
 async function markSourceSuccess(env: Env, source: SourceRecord, meta: FetchMeta): Promise<void> {
   await env.DB.prepare(
     `UPDATE sources SET etag = ?, last_modified = ?, last_success_at = ?, consecutive_failures = 0,
-     backoff_until = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+     last_error_at = NULL, backoff_until = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
   ).bind(meta.etag ?? source.etag ?? null, meta.lastModified ?? source.lastModified ?? null, new Date().toISOString(), source.id).run();
 }
 
 async function markSourceFailure(env: Env, source: SourceRecord, failure: FetchFailure): Promise<void> {
   const attempts = (source.consecutiveFailures ?? 0) + 1;
-  const delaySeconds = failure.retryAfterSeconds ?? Math.min(86_400, 60 * 2 ** Math.min(attempts, 8));
+  const delaySeconds = sourceBackoffSeconds(failure, attempts);
   await env.DB.prepare(
     `UPDATE sources SET last_error_at = ?, consecutive_failures = ?, backoff_until = ?,
      updated_at = CURRENT_TIMESTAMP WHERE id = ?`
@@ -1769,15 +1779,27 @@ const worker = {
     for (const message of batch.messages) {
       const mode = message.body.reason ?? 'scheduled';
       const sources = await readSources(env, message.body.sourceIds, mode !== 'scheduled');
-      const failures: string[] = [];
+      const retryableFailures: string[] = [];
+      const permanentFailures: string[] = [];
       for (const source of sources) {
         try {
           await ingestSource(env, source, { mode, since: message.body.since, page: message.body.page });
         }
-        catch (error) { failures.push(`${source.id}: ${errorMessage(error)}`); }
+        catch (error) {
+          const message = `${source.id}: ${errorMessage(error)}`;
+          if (isPermanentFetchFailure(error as FetchFailure)) permanentFailures.push(message);
+          else retryableFailures.push(message);
+        }
       }
-      if (failures.length) {
-        console.error('ingest batch failed', failures);
+      if (permanentFailures.length) console.error({
+        event: 'ingest_source_manual_review', failures: permanentFailures,
+        occurredAt: new Date().toISOString()
+      });
+      if (retryableFailures.length) {
+        console.error({
+          event: 'ingest_batch_retry', failures: retryableFailures,
+          occurredAt: new Date().toISOString()
+        });
         message.retry({ delaySeconds: 60 });
       } else {
         message.ack();
