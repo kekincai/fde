@@ -22,7 +22,10 @@ type Props = {
 export default function RadarHeader({ view, channel, query, user, onHome, onAbout, onKnowledge, onChannel, onAdmin, onQuery, onMobileSearch, onAccount }: Props) {
   return <>
     <header className="topbar">
-      <button className="brand" type="button" onClick={onHome} aria-label="最初の画面へ戻る"><img src="/icon-192.png" alt="" /><span>FDE <b>RADAR</b></span></button>
+      <button className="brand" type="button" onClick={onHome} aria-label="最初の画面へ戻る">
+        <span className="brand-mark" aria-hidden="true"><img src="/icon-192.png" alt="" /><i /></span>
+        <span>FDE <b>RADAR</b></span>
+      </button>
       <nav aria-label="メインナビゲーション">
         <button className={view === 'about' ? 'active' : ''} onClick={onAbout}>FDEとは</button>
         <button className={view === 'knowledge' ? 'active' : ''} onClick={onKnowledge}><span className="desktop-label">ナレッジマップ</span><span className="mobile-label">知識マップ</span></button>

@@ -41,8 +41,39 @@ a { color: inherit; text-decoration: none; }
   background: rgba(255, 255, 255, .98);
 }
 .brand { display: flex; align-items: center; gap: 11px; padding: 0; background: transparent; font-size: 14px; font-weight: 700; letter-spacing: .08em; white-space: nowrap; }
-.brand img { width: 34px; height: 34px; border-radius: 9px; }
+.brand-mark { position: relative; width: 34px; height: 34px; display: block; flex: 0 0 34px; }
+.brand-mark img { width: 34px; height: 34px; display: block; border-radius: 9px; }
+.brand-mark i, .brand-mark i::after {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  background: #f0442e;
+  clip-path: polygon(0 0, 100% 50%, 0 100%);
+}
+.brand-mark i {
+  top: 1px;
+  right: 0;
+  transform: rotate(-45deg);
+  transform-origin: center;
+  animation: brand-signal-pulse 1.8s ease-in-out infinite;
+}
+.brand-mark i::after {
+  content: '';
+  inset: 0;
+  opacity: 0;
+  animation: brand-signal-ripple 1.8s ease-out infinite;
+}
 .brand b { color: var(--blue); }
+
+@keyframes brand-signal-pulse {
+  0%, 100% { opacity: .55; filter: drop-shadow(0 0 0 rgba(240, 68, 46, 0)); }
+  42% { opacity: 1; filter: drop-shadow(0 0 3px rgba(240, 68, 46, .78)); }
+}
+
+@keyframes brand-signal-ripple {
+  20% { opacity: .38; transform: scale(1); }
+  75%, 100% { opacity: 0; transform: scale(2.1); }
+}
 .topbar nav { height: 100%; display: flex; align-items: stretch; gap: 2px; margin-left: 38px; }
 .topbar nav button { padding: 0 11px; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .topbar nav button:hover, .topbar nav button.active { border-bottom-color: var(--blue); color: var(--blue); }
@@ -321,7 +352,7 @@ footer a { display: flex; align-items: center; gap: 7px; }
   body { padding-bottom: 58px; }
   .topbar, main, footer { width: calc(100% - 28px); }
   .topbar { height: 64px; }
-  .brand span { display: none; }
+  .brand > span:last-child { display: none; }
   .topbar nav { position: fixed; z-index: 19; right: 0; bottom: 0; left: 0; height: 58px; display: flex; justify-content: space-around; margin: 0; padding: 0 8px; border-top: 1px solid var(--line); background: #fff; }
   .topbar nav button { flex: 1; min-width: 0; height: 58px; padding: 0 4px; border-top: 2px solid transparent; border-bottom: 0; font-size: 11px; }
   .topbar nav button:hover, .topbar nav button.active { border-top-color: var(--blue); border-bottom: 0; }
@@ -417,4 +448,5 @@ footer a { display: flex; align-items: center; gap: 7px; }
 
 @media (prefers-reduced-motion: reduce) {
   * { scroll-behavior: auto !important; transition: none !important; }
+  .brand-mark i, .brand-mark i::after { animation: none !important; }
 }
