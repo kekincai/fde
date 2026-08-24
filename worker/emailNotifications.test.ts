@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { jstDayWindow, renderDailyDigest, renderFailureEmail, sourceIssue, type SourceHealth } from './emailNotifications.ts';
+import { jstDayWindow, renderConfigurationTest, renderDailyDigest, renderFailureEmail, sourceIssue, type SourceHealth } from './emailNotifications.ts';
 
 const healthySource: SourceHealth = {
   id: 'source-1', name: '公式 <Source>', homepage: 'https://example.com/?a=1&b=2',
@@ -41,6 +41,15 @@ test('メール本文で外部コンテンツを HTML escape する', () => {
   assert.doesNotMatch(email.html, /公式 <Source>/);
 });
 
+test('メールはサイトと同じカラートークンとテーブルレイアウトを使う', () => {
+  const email = renderConfigurationTest(new Date('2026-08-24T09:30:00.000Z'));
+  assert.match(email.html, /#10203d/);
+  assert.match(email.html, /#2059dc/);
+  assert.match(email.html, /#d8e0eb/);
+  assert.match(email.html, /role="presentation"/);
+  assert.doesNotMatch(email.html, /#0f2925|#087f68|#f4f1ea/);
+});
+
 test('日報は優先度・要約・取得健康度を含む', () => {
   const email = renderDailyDigest('2026-08-24', [{
     title: 'AI導入の実務', canonical_url: 'https://example.com/article', source_name: 'Example',
@@ -48,7 +57,9 @@ test('日報は優先度・要約・取得健康度を含む', () => {
     why_it_matters: '', recommended_action: '今週検証する', published_at: '2026-08-24T08:00:00.000Z'
   }], 1, { runs: 10, successful_runs: 9, failed_runs: 1, new_articles: 1 }, 60, 1);
   assert.match(email.subject, /新着 1件/);
-  assert.match(email.html, /取得成功率 <b>90%/);
+  assert.match(email.html, /FETCH SUCCESS/);
+  assert.match(email.html, />90%</);
   assert.match(email.html, /現場導入の要点/);
+  assert.match(email.html, /background:#edf3ff/);
   assert.match(email.text, /AI導入の実務/);
 });
