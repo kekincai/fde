@@ -3,9 +3,10 @@ import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import { pillarLabels, pillars, priorityMeta, topics, type Article, type Channel, type Priority, type Region, type SortOrder } from '../data/articles';
 import { track, type AnalyticsSection } from '../lib/analytics';
 import AuthDrawer from './radar/AuthDrawer';
+import AboutFde from './radar/AboutFde';
 import Icon from './radar/Icon';
 import KnowledgeMap from './radar/KnowledgeMap';
-import { formatDate, fromApi, type ApiArticle, type CoverageChapter, type Overview, type Pagination, type User } from './radar/model';
+import { fromApi, type ApiArticle, type CoverageChapter, type Overview, type Pagination, type User } from './radar/model';
 import RadarHeader, { type RadarView } from './radar/RadarHeader';
 import SignalRow from './radar/SignalRow';
 
@@ -16,14 +17,6 @@ const sortOptions: Array<{ value: SortOrder; label: string }> = [
   { value: 'newest', label: '新着' },
   { value: 'priority', label: '重要度' },
   { value: 'published', label: '公開日' }
-];
-
-const fdeSteps = [
-  ['01', '顧客課題', '業務と制約を理解する'],
-  ['02', '構築', '小さく作って確かめる'],
-  ['03', '本番導入', '既存の現場へつなぐ'],
-  ['04', '統制・安全', '品質・権限・リスクを守る'],
-  ['05', '組織・定着', '運用を残し、再現可能にする']
 ];
 
 export default function RadarApp() {
@@ -44,12 +37,11 @@ export default function RadarApp() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [mobileFilters, setMobileFilters] = useState(false);
   const [mobileSearchOpen, setMobileSearchOpen] = useState(false);
-  const [aboutExpanded, setAboutExpanded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [page, setPage] = useState(1);
   const [pagination, setPagination] = useState<Pagination>(emptyPagination);
-  const [view, setView] = useState<RadarView>('radar');
+  const [view, setView] = useState<RadarView>('about');
 
   const section: AnalyticsSection = view === 'admin' ? 'admin' : channel === 'action' && region === 'Japan' ? 'japan' : channel === 'career' ? 'research' : channel;
 
@@ -137,7 +129,7 @@ export default function RadarApp() {
   }
 
   function returnHome() {
-    setView('radar');
+    setView('about');
     setChannel('action');
     setRegion('ALL');
     setPillar('すべて');
@@ -150,17 +142,16 @@ export default function RadarApp() {
     setDrawerOpen(false);
     setMobileFilters(false);
     setMobileSearchOpen(false);
-    setAboutExpanded(false);
     setPage(1);
     track('section_view', 'about');
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
   function showAbout() {
-    setView('radar');
-    setAboutExpanded(true);
+    setView('about');
+    setDrawerOpen(false);
     track('section_view', 'about');
-    window.setTimeout(() => document.getElementById('about')?.scrollIntoView({ behavior: 'smooth' }), 0);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
   function showKnowledge() {
@@ -205,20 +196,7 @@ export default function RadarApp() {
       setView('radar');
       resetPage();
       scrollToSignals();
-    }} /></main> : <main id="top">
-      <section id="about" className="radar-intro">
-        <div className="intro-copy">
-          <h1>AIを、現場で使える成果に変える。</h1>
-          <p><b>FDE Radar</b> は、世界と日本のAI導入シグナルを、顧客・事業への影響と次の行動が分かる判断材料に整理します。</p>
-          <div className="intro-links"><button onClick={() => setAboutExpanded(!aboutExpanded)} aria-expanded={aboutExpanded}>FDEの仕事の流れを見る<Icon name="chevron" size={15} /></button><button onClick={showKnowledge}>24の問いから探す<Icon name="map" size={15} /></button></div>
-        </div>
-        <div className="update-status"><span className="live-dot" />6時間ごとに自動収集<small>最終更新 {formatDate(overview.last_ingested_at)}</small></div>
-      </section>
-
-      <section className={`fde-flow ${aboutExpanded ? 'is-open' : ''}`} aria-hidden={!aboutExpanded}>
-        <ol>{fdeSteps.map(([step, title, copy]) => <li key={step}><i>{step}</i><div><b>{title}</b><small>{copy}</small></div></li>)}</ol>
-      </section>
-
+    }} /></main> : view === 'about' ? <AboutFde overview={overview} onKnowledge={showKnowledge} onAction={() => go('action')} /> : <main id="top">
       <section id="signals" className="workspace-bar">
         <div><h2>{workspaceTitle}</h2><p>顧客・事業への影響から、次に確認・検証することを読み取れます。</p></div>
         <div className="signal-count"><strong>{pagination.total}</strong><span>件のシグナル<small>{page} / {pagination.totalPages} ページ</small></span></div>
