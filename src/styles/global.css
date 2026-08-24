@@ -35,12 +35,13 @@ a { color: inherit; text-decoration: none; }
   top: 0;
   z-index: 20;
   height: 72px;
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
   border-bottom: 1px solid var(--line);
   background: rgba(255, 255, 255, .98);
 }
-.brand { display: flex; align-items: center; gap: 11px; padding: 0; background: transparent; font-size: 14px; font-weight: 700; letter-spacing: .08em; white-space: nowrap; }
+.brand { grid-column: 1; justify-self: start; display: flex; align-items: center; gap: 11px; padding: 0; background: transparent; font-size: 14px; font-weight: 700; letter-spacing: .08em; white-space: nowrap; }
 .brand-mark { position: relative; width: 34px; height: 34px; display: block; flex: 0 0 34px; }
 .brand-mark img { width: 34px; height: 34px; display: block; border-radius: 9px; }
 .brand-mark i, .brand-mark i::after {
@@ -74,11 +75,14 @@ a { color: inherit; text-decoration: none; }
   20% { opacity: .38; transform: scale(1); }
   75%, 100% { opacity: 0; transform: scale(2.1); }
 }
-.topbar nav { height: 100%; display: flex; align-items: stretch; gap: 2px; margin-left: 38px; }
-.topbar nav button { padding: 0 11px; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.topbar nav { grid-column: 2; height: 100%; display: flex; align-items: stretch; justify-self: center; gap: 2px; }
+.topbar nav button { display: flex; align-items: center; gap: 7px; padding: 0 10px; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.topbar nav button svg { flex: 0 0 auto; opacity: .72; }
+.topbar nav button:hover svg, .topbar nav button.active svg { opacity: 1; }
 .topbar nav button:hover, .topbar nav button.active { border-bottom-color: var(--blue); color: var(--blue); }
 .mobile-label, .mobile-search-button { display: none; }
-.header-search { width: min(250px, 19vw); height: 40px; display: flex; align-items: center; gap: 9px; margin-left: auto; padding: 0 12px; border: 1px solid var(--line); background: var(--wash); color: var(--muted); }
+.header-actions { grid-column: 3; min-width: 0; display: flex; align-items: center; justify-self: end; }
+.header-search { width: min(250px, 19vw); height: 40px; display: flex; align-items: center; gap: 9px; padding: 0 12px; border: 1px solid var(--line); background: var(--wash); color: var(--muted); }
 .header-search input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; font-size: 12px; }
 .account-button { display: flex; align-items: center; gap: 8px; margin-left: 12px; padding: 10px 14px; background: var(--ink); color: white; font-size: 12px; }
 
@@ -94,7 +98,10 @@ a { color: inherit; text-decoration: none; }
 .about-status > div { display: flex; align-items: center; gap: 10px; font-size: 11px; }
 .about-status > small { display: block; margin: 7px 0 0 18px; color: var(--muted); font-size: 10px; }
 .about-section { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 70px; padding: 70px 0; border-bottom: 1px solid var(--line); }
-.about-section > header > span, .about-next > div:first-child > span { color: var(--blue); font-size: 10px; font-weight: 700; letter-spacing: .14em; }
+.section-heading { align-self: start; display: grid; grid-template-columns: 40px minmax(0, 1fr); gap: 14px; }
+.section-heading > svg { margin-top: 2px; color: var(--blue); stroke-width: 1.45; }
+.section-heading > div > span { color: var(--blue); font-size: 10px; font-weight: 700; letter-spacing: .14em; }
+.section-heading > div > p { margin: 12px 0 0; color: var(--muted); font-size: 11px; line-height: 1.7; }
 .about-section h2, .about-next h2 { margin: 12px 0 0; font-size: 28px; line-height: 1.5; letter-spacing: -.035em; }
 .role-boundary > div > p { max-width: 800px; margin: 0 0 32px; color: #4f5e76; font-size: 15px; line-height: 2; }
 .role-boundary dl { display: grid; grid-template-columns: repeat(4, 1fr); margin: 0; border-top: 1px solid var(--ink); border-bottom: 1px solid var(--line); }
@@ -107,20 +114,18 @@ a { color: inherit; text-decoration: none; }
 .field-loop-section li i { color: var(--blue); font-size: 11px; font-style: normal; font-weight: 700; }
 .field-loop-section li b { font-size: 14px; }
 .field-loop-section li p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.7; }
-.radar-purpose > header p { margin: 12px 0 0; color: var(--coral); font-size: 12px; }
 .radar-process { display: grid; grid-template-columns: repeat(3, 1fr); border-top: 1px solid var(--ink); }
 .radar-process > div { min-height: 190px; padding: 20px 22px; border-left: 1px solid var(--line); }
 .radar-process > div:first-child { border-left: 0; }
-.radar-process i, .radar-process b { display: block; }
-.radar-process i { color: var(--blue); font-size: 10px; font-style: normal; }
-.radar-process b { margin-top: 25px; font-size: 17px; }
+.radar-process svg, .radar-process b { display: block; }
+.radar-process svg { color: var(--blue); stroke-width: 1.45; }
+.radar-process b { margin-top: 20px; font-size: 17px; }
 .radar-process p { margin: 9px 0 0; color: var(--muted); font-size: 12px; line-height: 1.8; }
 .about-next { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 70px; padding: 70px 0 0; }
-.about-next > div:first-child p { margin: 13px 0 0; color: var(--muted); font-size: 12px; }
 .about-next-actions { border-top: 1px solid var(--ink); }
 .about-next-actions button { width: 100%; display: grid; grid-template-columns: 42px 180px 1fr auto; align-items: center; gap: 16px; padding: 22px 10px 22px 0; border-bottom: 1px solid var(--line); background: transparent; text-align: left; }
 .about-next-actions button:hover { background: var(--blue-soft); color: var(--blue); }
-.about-next-actions button > span { color: var(--blue); font-size: 10px; font-weight: 700; }
+.about-next-actions button > svg:first-child { justify-self: center; color: var(--blue); }
 .about-next-actions button > b { font-size: 15px; }
 .about-next-actions button > small { color: var(--muted); font-size: 11px; }
 .about-sources > div { border-top: 1px solid var(--ink); }
@@ -336,8 +341,7 @@ footer a { display: flex; align-items: center; gap: 7px; }
 
 @media (max-width: 1120px) {
   .topbar, main, footer { width: calc(100% - 44px); }
-  .topbar nav { margin-left: 20px; }
-  .topbar nav button { padding: 0 7px; font-size: 11px; }
+  .topbar nav button { gap: 5px; padding: 0 6px; font-size: 11px; }
   .header-search { display: none; }
   .chapter-columns { grid-template-columns: repeat(3, 1fr); }
   .chapter-columns > section:nth-child(4) { border-top: 1px solid var(--line); border-left: 0; }
@@ -349,12 +353,13 @@ footer a { display: flex; align-items: center; gap: 7px; }
 
 @media (max-width: 760px) {
   html { scroll-padding-top: 68px; }
-  body { padding-bottom: 58px; }
+  body { padding-bottom: 64px; }
   .topbar, main, footer { width: calc(100% - 28px); }
   .topbar { height: 64px; }
   .brand > span:last-child { display: none; }
-  .topbar nav { position: fixed; z-index: 19; right: 0; bottom: 0; left: 0; height: 58px; display: flex; justify-content: space-around; margin: 0; padding: 0 8px; border-top: 1px solid var(--line); background: #fff; }
-  .topbar nav button { flex: 1; min-width: 0; height: 58px; padding: 0 4px; border-top: 2px solid transparent; border-bottom: 0; font-size: 11px; }
+  .topbar nav { position: fixed; z-index: 19; right: 0; bottom: 0; left: 0; width: 100%; height: 64px; display: flex; justify-content: space-around; justify-self: stretch; margin: 0; padding: 0 8px; border-top: 1px solid var(--line); background: #fff; }
+  .topbar nav button { flex: 1; min-width: 0; height: 64px; flex-direction: column; justify-content: center; gap: 3px; padding: 0 4px; border-top: 2px solid transparent; border-bottom: 0; font-size: 9px; line-height: 1; }
+  .topbar nav button svg { width: 19px; height: 19px; }
   .topbar nav button:hover, .topbar nav button.active { border-top-color: var(--blue); border-bottom: 0; }
   .topbar nav .desktop-only, .topbar nav .desktop-admin { display: none; }
   .desktop-label { display: none; }

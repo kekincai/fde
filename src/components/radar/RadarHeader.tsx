@@ -27,15 +27,17 @@ export default function RadarHeader({ view, channel, query, user, onHome, onAbou
         <span>FDE <b>RADAR</b></span>
       </button>
       <nav aria-label="メインナビゲーション">
-        <button className={view === 'about' ? 'active' : ''} onClick={onAbout}>FDEとは</button>
-        <button className={view === 'knowledge' ? 'active' : ''} onClick={onKnowledge}><span className="desktop-label">ナレッジマップ</span><span className="mobile-label">知識マップ</span></button>
-        <button className={view === 'radar' && channel !== 'saved' ? 'active' : ''} onClick={() => onChannel('action')}>収集情報</button>
-        <button className={view === 'radar' && channel === 'saved' ? 'active' : ''} onClick={() => onChannel('saved')}>保存済み</button>
-        {user?.isAdmin && <button className={`desktop-admin ${view === 'admin' ? 'active' : ''}`} onClick={onAdmin}>管理</button>}
+        <button className={view === 'about' ? 'active' : ''} onClick={onAbout}><Icon name="compass" size={17} /><span>FDEとは</span></button>
+        <button className={view === 'knowledge' ? 'active' : ''} onClick={onKnowledge}><Icon name="map" size={17} /><span className="desktop-label">ナレッジマップ</span><span className="mobile-label">知識マップ</span></button>
+        <button className={view === 'radar' && channel !== 'saved' ? 'active' : ''} onClick={() => onChannel('action')}><Icon name="radar" size={17} /><span>収集情報</span></button>
+        <button className={view === 'radar' && channel === 'saved' ? 'active' : ''} onClick={() => onChannel('saved')}><Icon name="bookmark" size={17} /><span>保存済み</span></button>
+        {user?.isAdmin && <button className={`desktop-admin ${view === 'admin' ? 'active' : ''}`} onClick={onAdmin}><Icon name="chart" size={17} /><span>管理</span></button>}
       </nav>
-      {view === 'radar' && <label className="header-search"><Icon name="search" size={17} /><input value={query} onChange={(event) => onQuery(event.target.value)} placeholder="企業・技術・課題を検索" /></label>}
-      {view === 'radar' && <button className="mobile-search-button" onClick={onMobileSearch} aria-label="検索を開く"><Icon name="search" size={18} /></button>}
-      <button className="account-button" onClick={onAccount}><Icon name="user" size={18} /><span>{user ? user.displayName : 'ログイン'}</span></button>
+      <div className="header-actions">
+        {view === 'radar' && <label className="header-search"><Icon name="search" size={17} /><input value={query} onChange={(event) => onQuery(event.target.value)} placeholder="企業・技術・課題を検索" /></label>}
+        {view === 'radar' && <button className="mobile-search-button" onClick={onMobileSearch} aria-label="検索を開く"><Icon name="search" size={18} /></button>}
+        <button className="account-button" onClick={onAccount}><Icon name="user" size={18} /><span>{user ? user.displayName : 'ログイン'}</span></button>
+      </div>
     </header>
   </>;
 }
