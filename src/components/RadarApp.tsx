@@ -187,6 +187,22 @@ export default function RadarApp() {
     track('section_view', next === 'action' && nextRegion === 'Japan' ? 'japan' : next === 'career' ? 'research' : next);
     window.setTimeout(() => document.getElementById('signals')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0);
   }
+  function returnHome() {
+    setView('radar');
+    setChannel('action');
+    setRegion('ALL');
+    setPillar('すべて');
+    setTopic('すべて');
+    setChapter('');
+    setPriority('ALL');
+    setQuery('');
+    setSelected('');
+    setDrawerOpen(false);
+    setMobileFilters(false);
+    setPage(1);
+    track('section_view', 'about');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
   function scrollAbout() { setView('radar'); track('section_view', 'about'); window.setTimeout(() => document.getElementById('about')?.scrollIntoView({ behavior: 'smooth' }), 0); }
   function selectArticle(article: Article) {
     const opening = selected !== article.id;
@@ -195,7 +211,7 @@ export default function RadarApp() {
   }
   return <div className="app-shell">
     <header className="topbar">
-      <button className="brand" type="button" onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })} aria-label="ページの先頭へ"><img src="/icon-192.png" alt="" /><span>FDE <b>RADAR</b></span></button>
+      <button className="brand" type="button" onClick={returnHome} aria-label="最初の画面へ戻る"><img src="/icon-192.png" alt="" /><span>FDE <b>RADAR</b></span></button>
       <nav><button onClick={scrollAbout}>FDEとは</button><button className={view === 'radar' && channel === 'action' && region === 'ALL' ? 'active' : ''} onClick={() => go('action')}>アクション</button><button className={view === 'radar' && channel === 'action' && region === 'Japan' ? 'active' : ''} onClick={() => go('action', 'Japan')}>日本</button><button className={view === 'radar' && channel === 'research' ? 'active' : ''} onClick={() => go('research')}>リサーチ</button><button className={view === 'radar' && channel === 'saved' ? 'active' : ''} onClick={() => go('saved')}>保存済み</button>{user?.isAdmin && <button className={view === 'admin' ? 'active' : ''} onClick={() => { setView('admin'); track('section_view', 'admin'); window.scrollTo({ top: 0, behavior: 'smooth' }); }}>管理</button>}</nav>
       {view === 'radar' && <label className="header-search"><Icon name="search" size={17} /><input value={query} onChange={(event) => { setQuery(event.target.value); resetPage(); }} placeholder="企業・技術・課題を検索" /></label>}
       <button className="account-button" onClick={() => setDrawerOpen(true)}><Icon name="user" size={18} /><span>{user ? user.displayName : 'ログイン'}</span></button>
