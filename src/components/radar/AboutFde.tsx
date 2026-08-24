@@ -27,7 +27,6 @@ export default function AboutFde({ overview, onKnowledge, onAction }: Props) {
       <div>
         <h1 id="fde-definition-title">FDEとは、顧客の現場で<br />AIを本番の成果に変える<br />フォワード・デプロイド・エンジニアです。</h1>
         <p><b>FDE は Forward Deployed Engineer の略です。</b> 顧客チームと並走し、課題発見、技術要件の定義、システム設計、実装、評価、本番導入、利用定着までを端から端まで担います。</p>
-        <strong>フロントエンドエンジニアとは異なる職種です。</strong>
       </div>
       <aside className="about-status" aria-label="FDE Radar の収集状況">
         <span>FDE RADAR</span>

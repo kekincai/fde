@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { evaluateCandidate } from './intelligence.ts';
+import { evaluateCandidate, SEMANTIC_REVIEW_POLICY } from './intelligence.ts';
 import type { SourceRecord } from './sourceRegistry.ts';
 
 const source: SourceRecord = {
@@ -10,6 +10,11 @@ const source: SourceRecord = {
   weight: 80, minScore: 45, priority: 80, pollIntervalMinutes: 360,
   stream: 'japan-enterprise', semanticPolicy: 'required'
 };
+
+test('defines FDE positively without unrelated role comparisons', () => {
+  assert.match(SEMANTIC_REVIEW_POLICY, /課題発見.*本番導入.*利用定着/);
+  assert.doesNotMatch(SEMANTIC_REVIEW_POLICY, /フロント|front.?end|前端/i);
+});
 
 test('rejects generic AI news without an FDE consequence', () => {
   const result = evaluateCandidate(source, {

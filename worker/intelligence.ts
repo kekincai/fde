@@ -36,6 +36,8 @@ const CONTROL = /security|governance|privacy|personal data|identity|permission|e
 const BUILD = /agent|rag|retrieval|connector|mcp|tool use|coding agent|codex|エージェント|検索|コネクタ|ツール利用/i;
 const GENERIC_NOISE = /giveaway|coupon|wallpaper|horoscope|sports score|celebrity|ゲーム攻略|プレゼント|占い|芸能|株価だけ/i;
 
+export const SEMANTIC_REVIEW_POLICY = 'あなたは FDE Radar の編集判定器です。FDE は顧客チームと並走し、課題発見、技術要件の定義、システム設計、実装、評価、本番導入、利用定着、現場から製品・モデルへのフィードバックまでを端から端まで担う実践です。一般的なAIニュース、モデル性能だけの話、AIと無関係な行政情報は reject。顧客課題、企業導入、統合、本番運用、ID・権限、評価、監視、セキュリティ、組織定着、FDEの役割に具体的な意味があるものだけ publish。曖昧なら review。説明は日本語で短く、記事にない事実を作らないでください。';
+
 function bounded(value: unknown, fallback = 0): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? Math.max(0, Math.min(100, parsed)) : fallback;
@@ -108,7 +110,7 @@ export async function reviewWithWorkersAI(ai: Ai, source: SourceRecord, item: Ca
     },
     required: ['decision', 'confidence', 'corePillar', 'topics', 'signalType', 'relevanceScore', 'actionabilityScore', 'clientFitScore', 'whyItMattersJa', 'recommendedActionJa', 'evidenceJa', 'rejectionReason']
   };
-  const prompt = `あなたは FDE Radar の編集判定器です。FDE はフロントエンド開発ではなく、顧客の現場を理解し、AIを小さく試し、本番導入・運用・安全性・成果を確かめ、再利用可能な型として残す実践です。一般的なAIニュース、モデル性能だけの話、AIと無関係な行政情報は reject。顧客課題、企業導入、統合、本番運用、ID・権限、評価、監視、セキュリティ、組織定着、FDEの役割に具体的な意味があるものだけ publish。曖昧なら review。説明は日本語で短く、記事にない事実を作らないでください。\n\n情報源: ${source.name}\n分類ストリーム: ${source.stream ?? 'production-pattern'}\nタイトル: ${item.title}\n概要: ${item.summary.slice(0, 3500)}\nタグ: ${item.tags.join(', ')}\nURL: ${item.url}`;
+  const prompt = `${SEMANTIC_REVIEW_POLICY}\n\n情報源: ${source.name}\n分類ストリーム: ${source.stream ?? 'production-pattern'}\nタイトル: ${item.title}\n概要: ${item.summary.slice(0, 3500)}\nタグ: ${item.tags.join(', ')}\nURL: ${item.url}`;
   const runner = ai as unknown as { run(model: string, input: Record<string, unknown>): Promise<unknown> };
   const output = await runner.run('@cf/meta/llama-3.1-8b-instruct-fast', {
     messages: [{ role: 'system', content: 'Return only data matching the JSON schema.' }, { role: 'user', content: prompt }],
