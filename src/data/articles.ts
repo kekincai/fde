@@ -1,6 +1,7 @@
 export type Region = 'Japan' | 'Global';
 export type Priority = 'P0' | 'P1' | 'P2';
 export type Channel = 'action' | 'research' | 'career' | 'saved';
+export type SortOrder = 'newest' | 'priority' | 'published';
 
 export type Article = {
   id: string;
@@ -19,7 +20,7 @@ export type Article = {
   location: string;
   sector: string;
   publishedAt: string;
-  time: string;
+  collectedAt: string;
   summary: string;
   relevanceTags: string[];
   url: string;

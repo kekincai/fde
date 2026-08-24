@@ -14,6 +14,7 @@ import { Hono } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import postgres from 'postgres';
 
+import { articleOrderBy, normalizeArticleSort } from './articleSort';
 import { chapterDefinitions, inferChapter } from './chapters';
 import {
   DAILY_DIGEST_CRON,
@@ -135,7 +136,8 @@ app.get('/api/config', (c) => c.json({
   regions: ['ALL', 'Japan', 'Global'],
   priorities: ['ALL', 'P0', 'P1', 'P2'],
   topics: ['Identity', 'Observability', 'Integration', 'Cost', 'Evaluation', 'Human-in-the-loop', 'Change Management'],
-  channels: ['action', 'research', 'career']
+  channels: ['action', 'research', 'career'],
+  sorts: ['newest', 'priority', 'published']
 }));
 
 app.get('/api/articles', async (c) => {
@@ -147,6 +149,7 @@ app.get('/api/articles', async (c) => {
   const chapter = c.req.query('chapter')?.trim() ?? '';
   const channel = c.req.query('channel') ?? 'action';
   const contentType = c.req.query('type') ?? 'すべて';
+  const sort = normalizeArticleSort(c.req.query('sort'));
   const page = Math.max(Number(c.req.query('page') ?? 1) || 1, 1);
   const pageSize = Math.min(Math.max(Number(c.req.query('pageSize') ?? 10) || 10, 1), 25);
   try {
@@ -193,8 +196,7 @@ app.get('/api/articles', async (c) => {
       `SELECT a.*, s.name AS source_name, s.source_kind
        FROM ${from}
        WHERE ${clauses.join(' AND ')}
-       ORDER BY CASE a.priority_level WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 ELSE 2 END,
-                a.priority_score DESC, a.published_at DESC LIMIT ? OFFSET ?`
+       ORDER BY ${articleOrderBy(sort)} LIMIT ? OFFSET ?`
       ).bind(...values, pageSize, (page - 1) * pageSize).all()
     ]);
     const total = Number(count?.total ?? 0);
@@ -386,6 +388,7 @@ app.get('/api/bookmarks', async (c) => {
   const priority = c.req.query('priority') ?? 'ALL';
   const topicLayer = c.req.query('layer')?.trim() ?? '';
   const chapter = c.req.query('chapter')?.trim() ?? '';
+  const sort = normalizeArticleSort(c.req.query('sort'));
   if (region !== 'ALL') { clauses.push('a.region = ?'); values.push(region); }
   if (pillar !== 'すべて') { clauses.push('a.core_pillar = ?'); values.push(pillar); }
   if (priority !== 'ALL') { clauses.push('a.priority_level = ?'); values.push(priority); }
@@ -401,8 +404,7 @@ app.get('/api/bookmarks', async (c) => {
     c.env.DB.prepare(
       `SELECT a.*, s.name AS source_name, s.source_kind, b.created_at AS bookmarked_at
        FROM ${from} WHERE ${clauses.join(' AND ')}
-       ORDER BY CASE a.priority_level WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 ELSE 2 END,
-       b.created_at DESC LIMIT ? OFFSET ?`
+       ORDER BY ${articleOrderBy(sort)} LIMIT ? OFFSET ?`
     ).bind(...values, pageSize, (page - 1) * pageSize).all()
   ]);
   const total = Number(count?.total ?? 0);

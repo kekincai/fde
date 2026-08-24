@@ -339,7 +339,10 @@ sequenceDiagram
 ```text
 .
 ├── src/
-│   ├── components/          # 公開画面・管理画面・認証 UI
+│   ├── components/
+│   │   ├── RadarApp.tsx     # 公開画面の状態と画面 composition
+│   │   ├── radar/           # 記事行、認証、ナレッジマップ、API mapping
+│   │   └── AdminDashboard.tsx
 │   ├── lib/                 # ブラウザー側の最小分析
 │   ├── pages/               # Astro entry point
 │   └── styles/              # レスポンシブ UI
@@ -347,10 +350,11 @@ sequenceDiagram
 │   ├── index.ts             # Hono API、認証、取得、Queue consumer
 │   ├── sourceRegistry.ts    # Source、取得方針、担当章
 │   ├── intelligence.ts      # Hard Gate と Workers AI 判定
+│   ├── articleSort.ts       # 新着・重要度・公開日の安全な SQL ordering
 │   ├── chapters.ts          # 24章と分類規則
 │   └── *.test.ts            # 収録条件と章供給の回帰テスト
 ├── migrations/
-│   ├── 0001...0021         # D1 schema とデータ補正
+│   ├── 0001...0023         # D1 schema とデータ補正
 │   └── postgres/            # 取得 snapshot 用 schema
 ├── docs/
 │   ├── ingestion-architecture.md
@@ -626,6 +630,8 @@ npx wrangler d1 execute DB --remote \
 | GET | `/api/admin/analytics` | 管理統計 | admin |
 
 詳細な request / response は実装中の型と各 route を正とします。APIを変更した場合は、この表と画面の呼び出しを同じ commit で更新してください。
+
+`/api/articles` と `/api/bookmarks` は `sort=newest|priority|published` を受け取ります。省略時は `newest` です。`newest` は再取得時刻ではなく `first_seen_at` を使うため、古い記事を再巡回しても一覧の先頭へ戻りません。`priority` は P0 → P1 → P2 と重要度スコア、`published` は情報源の公開日時で並べます。
 
 ## プライバシー、著作権、安全境界
 
