@@ -46,4 +46,4 @@ max_retries = 3
 max_concurrency = 5
 
 [triggers]
-crons = ["0 */6 * * *"]
+crons = ["0 */6 * * *", "*/30 * * * *", "30 9 * * *"]

@@ -418,16 +418,18 @@ npm run build
 4. Workers AI の `AI` binding を設定する。
 5. PostgreSQL を使う場合は `migrations/postgres/0001_archive.sql` を実行し、Hyperdrive を設定する。
 6. R2 fallback を使う場合だけ bucket を作り、`ARCHIVE` binding を有効にする。
-7. ingest の手動 API を保護する secret を設定する。
+7. ingest の手動 APIと、Resend の通知先を secret で設定する。
 8. D1 migration を適用し、deploy する。
 
 ```bash
 npx wrangler secret put INGEST_TOKEN
+npx wrangler secret put RESEND_API_KEY
+npx wrangler secret put RESEND_TO
 npm run db:migrate:remote
 npm run cf:deploy
 ```
 
-接続文字列、PostgreSQL のパスワード、API token、`INGEST_TOKEN` は Git に保存しません。
+`RESEND_TO` には通知先メールアドレスを設定します。接続文字列、PostgreSQL のパスワード、API token、メールアドレス、各種 secret は Git に保存しません。
 
 ## デプロイと変更手順
 
@@ -470,7 +472,15 @@ curl -fsS https://fde-radar.kekincai.workers.dev/api/ingest/status
 
 ### 定期実行
 
-Cron は `0 */6 * * *`、つまり UTC の6時間ごとに実行されます。Cron 自体は記事を取得せず、期限を迎えた Source を Queue に投入します。Queue consumer は `max_batch_size = 1`、`max_retries = 3`、`max_concurrency = 5` です。
+Cron は UTC で3本設定しています。
+
+| Cron | 日本時間 | 処理 |
+|---|---|---|
+| `0 */6 * * *` | 6時間ごと | 期限を迎えた Source を Queue に投入 |
+| `*/30 * * * *` | 30分ごと | D1 の Source 健康状態を確認し、継続障害だけをメール通知 |
+| `30 9 * * *` | 毎日18:30 | 当日新着記事と収集健康度の日報をメール送信 |
+
+Queue consumer は `max_batch_size = 1`、`max_retries = 3`、`max_concurrency = 5` です。
 
 ### 手動収集
 
@@ -535,17 +545,18 @@ flowchart TD
 - `/api/coverage`: 24章の `healthy / thin / empty`
 - 管理画面: page view、記事 open、保存、Source 品質
 
-### 失敗時のメール通知
+### メール通知
 
-Workers Logs は `wrangler.toml` の `[observability]` で有効化しています。収集処理は検索しやすい構造化 event を出力します。
+Cloudflare Free では Log Explorer の Scheduled Query と Email Sending が有料のため、FDE Radar は D1 を直接監視し、Resend Free から管理者へ送信します。ログ発生ではなく最終的な Source 状態を判定するため、一時的な失敗が後続 retry で回復した場合は通知しません。
 
-| event | 意味 | 推奨する通知条件 |
+| メール | 条件 | 重複制御 |
 |---|---|---|
-| `ingest_source_manual_review` | 401 / 403 など、自動再試行しない Source 障害 | 1件で通知 |
-| `ingest_batch_retry` | 429、5xx、接続失敗などの一時障害 | 同一時間帯に複数回で通知 |
-| `ingest_archive_failed` | PostgreSQL / Hyperdrive の任意 archive 障害 | 継続時に通知。D1公開処理とは分離 |
+| 収集異常 | 24時間以上の長期 backoff、`consecutive_failures >= 3`、または最終成功が期待周期の3倍（最低24時間）を超過 | Source ごとに6時間の cooldown |
+| 日報 | 毎日18:30 JST | JST の日付ごとに1回 |
 
-Cloudflare Dashboard の Worker `fde-radar` → Observability → Alerts で上記 event を条件にし、通知先を Email に設定します。Free plan でもメール通知を利用できます。403 は Queue 内で重複 retry せず7日 backoff するため、同じ恒久障害でメールが連続送信されません。
+日報は当日初回収集された記事を P0 → P1 → P2、priority score、公開時刻の順で最大30件掲載し、記事要約、次の一手、取得成功率、正常 / 異常 Source 数を含めます。新着が0件でも収集健康度を送信します。外部由来のタイトル、URL、要約は HTML escape してからメールへ埋め込みます。
+
+Workers Logs の構造化 event `ingest_source_manual_review`、`ingest_batch_retry`、`ingest_archive_failed` は調査用として引き続き出力します。
 
 ### 毎週見るもの
 

@@ -15,6 +15,14 @@ import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import postgres from 'postgres';
 
 import { chapterDefinitions, inferChapter } from './chapters';
+import {
+  DAILY_DIGEST_CRON,
+  INGEST_DISPATCH_CRON,
+  INGEST_HEALTH_CRON,
+  monitorIngestionHealth,
+  sendConfigurationTest,
+  sendDailyDigest
+} from './emailNotifications';
 import { FETCH_USER_AGENT, isPermanentFetchFailure, sourceBackoffSeconds } from './fetchPolicy';
 import { chaptersFor, collectionStreamFor, sourceRegistry, type ContentType, type FdePillar, type SourceKind, type SourceRecord } from './sourceRegistry';
 import { evaluateCandidate, reviewWithWorkersAI, type SemanticDecision } from './intelligence';
@@ -41,6 +49,9 @@ type Env = {
   INGEST_QUEUE: Queue<IngestMessage>;
   AI: Ai;
   INGEST_TOKEN?: string;
+  EMAIL_TEST_TOKEN?: string;
+  RESEND_API_KEY?: string;
+  RESEND_TO?: string;
 };
 
 type DbSourceRow = {
@@ -113,7 +124,7 @@ const CUSTOMER_PATTERN = /(customer stor|case stud|use case|business process|roi
 app.get('/api/health', (c) => c.json({
   ok: true,
   service: 'ai-fde-radar-api',
-  version: '2026-08-10-semantic-ingestion-v1',
+  version: '2026-08-24-email-notifications-v1',
   architecture: 'Astro + Hono + Workers + Workers AI + D1/FTS5 + Hyperdrive/PostgreSQL + KV + Queues',
   time: new Date().toISOString()
 }));
@@ -663,6 +674,18 @@ app.post('/api/ingest/backfill', async (c) => {
   }
   await c.env.CACHE.put('backfill:last-dispatch', JSON.stringify({ since, queued: messages.length, at: new Date().toISOString() }), { expirationTtl: 604800 });
   return c.json({ queued: messages.length, since, sources: sourcePages.map(({ source, pages }) => ({ id: source.id, pages })) });
+});
+
+app.post('/api/ingest/email/test', async (c) => {
+  if (!isEmailTestAuthorized(c.req.raw, c.env)) return c.json({ error: 'Unauthorized' }, 401);
+  const payload = await c.req.json().catch(() => ({})) as { kind?: 'connection' | 'daily' };
+  try {
+    if (payload.kind === 'daily') return c.json(await sendDailyDigest(c.env, new Date(), true));
+    return c.json(await sendConfigurationTest(c.env));
+  } catch (error) {
+    console.error({ event: 'notification_email_test_failed', message: errorMessage(error) });
+    return c.json({ error: errorMessage(error) }, 502);
+  }
 });
 
 async function readSources(env: Env, sourceIds?: string[], force = false): Promise<SourceRecord[]> {
@@ -1618,6 +1641,11 @@ function isAuthorized(request: Request, env: Env): boolean {
   return request.headers.get('authorization') === `Bearer ${env.INGEST_TOKEN}`;
 }
 
+function isEmailTestAuthorized(request: Request, env: Env): boolean {
+  if (!env.EMAIL_TEST_TOKEN) return false;
+  return request.headers.get('authorization') === `Bearer ${env.EMAIL_TEST_TOKEN}`;
+}
+
 type SessionIdentity = { sessionId: string; userId: string; displayName: string; isAdmin: boolean };
 
 function sameOrigin(request: Request): boolean {
@@ -1772,8 +1800,12 @@ const worker = {
     if (url.pathname.startsWith('/api/')) return app.fetch(request, env, ctx);
     return env.ASSETS.fetch(request);
   },
-  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(dispatchSources(env));
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
+    const scheduledAt = new Date(controller.scheduledTime);
+    if (controller.cron === INGEST_DISPATCH_CRON) ctx.waitUntil(dispatchSources(env));
+    else if (controller.cron === INGEST_HEALTH_CRON) ctx.waitUntil(monitorIngestionHealth(env, scheduledAt));
+    else if (controller.cron === DAILY_DIGEST_CRON) ctx.waitUntil(sendDailyDigest(env, scheduledAt));
+    else console.warn({ event: 'unknown_scheduled_trigger', cron: controller.cron, scheduledAt: scheduledAt.toISOString() });
   },
   async queue(batch: MessageBatch<IngestMessage>, env: Env) {
     for (const message of batch.messages) {
