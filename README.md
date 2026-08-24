@@ -364,6 +364,16 @@ sequenceDiagram
 └── package.json
 ```
 
+## アイコン設計
+
+UI アイコンは MIT ライセンスの [Tabler Icons](https://tabler.io/icons) に統一しています。React では `@tabler/icons-react` を利用し、`src/components/radar/Icon.tsx` の明示的な対応表から必要なアイコンだけを読み込みます。名前空間全体の動的 import は行わないため、アイコン数を増やしても未使用の数千アイコンを本番 bundle に含めません。
+
+- 基準グリッド: 24 × 24
+- 標準 stroke: 1.8
+- 本文・操作: 14–20px
+- セクション見出し: 25–32px
+- 装飾アイコンは `aria-hidden`、アイコンだけの操作はボタン側に `aria-label` を付与
+
 ## ローカル開発
 
 ### 必要なもの
