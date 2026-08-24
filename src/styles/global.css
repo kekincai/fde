@@ -108,7 +108,16 @@ a { color: inherit; text-decoration: none; }
 .signal-count span { color: var(--muted); font-size: 11px; }
 .signal-count small { display: block; font-size: 9px; }
 
-.control-bar { min-height: 68px; display: flex; align-items: center; gap: 24px; padding: 12px 0; border-top: 1px solid var(--ink); border-bottom: 1px solid var(--line); }
+.scope-bar { min-height: 58px; display: flex; align-items: center; justify-content: space-between; gap: 28px; padding: 10px 0; border-top: 1px solid var(--ink); border-bottom: 1px solid var(--line); }
+.scope-bar.saved-scope { justify-content: flex-end; }
+.scope-control { display: flex; align-items: center; gap: 5px; }
+.scope-control > span { margin-right: 7px; color: var(--muted); font-size: 10px; font-weight: 600; }
+.scope-control button { min-width: 92px; height: 34px; padding: 0 13px; border: 1px solid transparent; background: transparent; color: var(--muted); font-size: 11px; }
+.scope-control button:hover { background: var(--wash); color: var(--ink); }
+.scope-control button.active { border-color: #bfd0f7; background: var(--blue-soft); color: var(--blue); font-weight: 600; }
+.region-scope button { min-width: 76px; }
+
+.control-bar { min-height: 68px; display: flex; align-items: center; gap: 24px; padding: 12px 0; border-bottom: 1px solid var(--line); }
 .sort-control { display: grid; grid-template-columns: repeat(3, 84px); border: 1px solid var(--line); }
 .sort-control button { height: 38px; border-left: 1px solid var(--line); background: #fff; color: var(--muted); font-size: 12px; }
 .sort-control button:first-child { border-left: 0; }
@@ -314,7 +323,7 @@ footer a { display: flex; align-items: center; gap: 7px; }
   .topbar { height: 64px; }
   .brand span { display: none; }
   .topbar nav { position: fixed; z-index: 19; right: 0; bottom: 0; left: 0; height: 58px; display: flex; justify-content: space-around; margin: 0; padding: 0 8px; border-top: 1px solid var(--line); background: #fff; }
-  .topbar nav button { flex: 1; min-width: 58px; height: 58px; padding: 0 4px; border-top: 2px solid transparent; border-bottom: 0; font-size: 11px; }
+  .topbar nav button { flex: 1; min-width: 0; height: 58px; padding: 0 4px; border-top: 2px solid transparent; border-bottom: 0; font-size: 11px; }
   .topbar nav button:hover, .topbar nav button.active { border-top-color: var(--blue); border-bottom: 0; }
   .topbar nav .desktop-only, .topbar nav .desktop-admin { display: none; }
   .desktop-label { display: none; }
@@ -347,6 +356,11 @@ footer a { display: flex; align-items: center; gap: 7px; }
   .workspace-bar p { display: none; }
   .signal-count strong { font-size: 25px; }
   .signal-count span { font-size: 10px; }
+  .scope-bar, .scope-bar.saved-scope { display: grid; grid-template-columns: 1fr; justify-content: stretch; gap: 8px; padding: 11px 0; }
+  .scope-control { display: grid; grid-template-columns: 68px repeat(3, minmax(0, 1fr)); gap: 4px; }
+  .scope-control:not(.region-scope) { grid-template-columns: 68px repeat(2, minmax(0, 1fr)); }
+  .scope-control > span { margin: 0; }
+  .scope-control button, .region-scope button { min-width: 0; height: 36px; padding: 0 5px; font-size: 10px; }
   .mobile-search-field { height: 46px; display: grid; grid-template-columns: 24px 1fr 32px; align-items: center; gap: 6px; margin-bottom: 10px; padding: 0 9px 0 12px; border: 1px solid var(--line); background: var(--wash); color: var(--muted); }
   .mobile-search-field input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; font-size: 13px; }
   .mobile-search-field button { display: grid; place-items: center; padding: 6px; background: transparent; }

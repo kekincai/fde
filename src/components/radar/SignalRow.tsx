@@ -27,7 +27,7 @@ export default function SignalRow({ article, sort, saved, selected, section, onS
     </button>
     <button className={`bookmark-button ${saved ? 'is-saved' : ''}`} onClick={onSave} aria-label={saved ? '保存を解除' : '保存する'}><Icon name="bookmark" /></button>
     {selected && <div className="evidence-panel">
-      <div><span>次の判断</span><strong>{priorityMeta[article.priority].label}</strong><p>{article.recommendedAction || 'この情報は背景理解のために保存し、関連シグナルと合わせて確認します。'}</p></div>
+      <div><span>次に確認すること</span><strong>{priorityMeta[article.priority].label}</strong><p>{article.recommendedAction || 'この情報は背景理解のために保存し、関連シグナルと合わせて確認します。'}</p></div>
       <div><span>そう判断した根拠</span><p>{article.evidence || '情報源・内容・公開時刻から自動分類しています。'}</p><small>FDE関連度 {article.score}/100 · {article.contentType}</small></div>
       <a href={article.url} target="_blank" rel="noreferrer" onClick={() => { void fetch(`/api/articles/${article.id}/open`, { method: 'POST' }); track('source_click', section, article.id); }}>一次情報を読む<Icon name="external" size={15} /></a>
     </div>}

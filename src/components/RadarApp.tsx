@@ -116,16 +116,22 @@ export default function RadarApp() {
     window.setTimeout(() => document.getElementById('signals')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0);
   }
 
-  function go(next: Channel, japanOnly = false) {
+  function go(next: Channel) {
     setView('radar');
     setChannel(next);
-    setRegion(japanOnly ? 'Japan' : 'ALL');
+    setRegion('ALL');
     setPriority('ALL');
     setChapter('');
     setMobileFilters(false);
     setPage(1);
-    track('section_view', next === 'action' && japanOnly ? 'japan' : next === 'career' ? 'research' : next);
+    track('section_view', next === 'career' ? 'research' : next);
     scrollToSignals();
+  }
+
+  function chooseRegion(next: Region | 'ALL') {
+    setRegion(next);
+    resetPage();
+    track('section_view', next === 'Japan' ? 'japan' : channel === 'research' ? 'research' : 'action');
   }
 
   function returnHome() {
@@ -187,7 +193,7 @@ export default function RadarApp() {
   }
 
   return <div className="app-shell">
-    <RadarHeader view={view} channel={channel} japanOnly={region === 'Japan'} query={query} user={user} onHome={returnHome} onAbout={showAbout} onKnowledge={showKnowledge} onChannel={go} onAdmin={showAdmin} onQuery={(value) => { setQuery(value); resetPage(); }} onMobileSearch={() => { setView('radar'); setMobileSearchOpen(true); scrollToSignals(); }} onAccount={() => setDrawerOpen(true)} />
+    <RadarHeader view={view} channel={channel} query={query} user={user} onHome={returnHome} onAbout={showAbout} onKnowledge={showKnowledge} onChannel={go} onAdmin={showAdmin} onQuery={(value) => { setQuery(value); resetPage(); }} onMobileSearch={() => { setView('radar'); setMobileSearchOpen(true); scrollToSignals(); }} onAccount={() => setDrawerOpen(true)} />
 
     {view === 'admin' ? <Suspense fallback={<main className="admin-loading">管理データを読み込んでいます…</main>}><AdminDashboard /></Suspense> : view === 'knowledge' ? <main><KnowledgeMap coverage={coverage} selectedChapter={chapter} onSelect={(item) => {
       setChapter(item.id);
@@ -196,10 +202,15 @@ export default function RadarApp() {
       setView('radar');
       resetPage();
       scrollToSignals();
-    }} /></main> : view === 'about' ? <AboutFde overview={overview} onKnowledge={showKnowledge} onAction={() => go('action')} /> : <main id="top">
+    }} /></main> : view === 'about' ? <AboutFde overview={overview} onKnowledge={showKnowledge} onSignals={() => go('action')} /> : <main id="top">
       <section id="signals" className="workspace-bar">
         <div><h2>{workspaceTitle}</h2><p>顧客・事業への影響から、次に確認・検証することを読み取れます。</p></div>
         <div className="signal-count"><strong>{pagination.total}</strong><span>件のシグナル<small>{page} / {pagination.totalPages} ページ</small></span></div>
+      </section>
+
+      <section className={`scope-bar ${channel === 'saved' ? 'saved-scope' : ''}`} aria-label="表示する情報の範囲">
+        {channel !== 'saved' && <div className="scope-control" role="group" aria-label="情報の種類"><span>情報の種類</span><button className={channel === 'action' ? 'active' : ''} onClick={() => go('action')}>実務シグナル</button><button className={channel === 'research' ? 'active' : ''} onClick={() => go('research')}>リサーチ</button></div>}
+        <div className="scope-control region-scope" role="group" aria-label="対象地域"><span>対象地域</span>{(['ALL', 'Japan', 'Global'] as const).map((item) => <button className={region === item ? 'active' : ''} onClick={() => chooseRegion(item)} key={item}>{item === 'ALL' ? '全地域' : item === 'Japan' ? '日本' : 'グローバル'}</button>)}</div>
       </section>
 
       {mobileSearchOpen && <label className="mobile-search-field"><Icon name="search" size={17} /><input autoFocus value={query} onChange={(event) => { setQuery(event.target.value); resetPage(); }} placeholder="企業・技術・課題を検索" /><button type="button" onClick={() => { setMobileSearchOpen(false); setQuery(''); resetPage(); }} aria-label="検索を閉じる"><Icon name="close" size={16} /></button></label>}
@@ -214,7 +225,6 @@ export default function RadarApp() {
         <aside className={`filter-rail ${mobileFilters ? 'is-open' : ''}`}>
           <div className="filter-group"><span>FDEの観点</span>{pillars.map((item) => <button className={pillar === item ? 'active' : ''} onClick={() => { setPillar(item); setChapter(''); resetPage(); }} key={item}>{pillarLabels[item]}</button>)}</div>
           {chapter && <div className="active-chapter"><span>選択中の問い</span><b>{coverage.find((item) => item.id === chapter)?.titleJa}</b><button onClick={() => { setChapter(''); setPillar('すべて'); resetPage(); }}>解除</button></div>}
-          <div className="filter-group"><span>地域</span>{(['ALL', 'Japan', 'Global'] as const).map((item) => <button className={region === item ? 'active' : ''} onClick={() => { setRegion(item); resetPage(); }} key={item}>{item === 'ALL' ? 'すべて' : item === 'Japan' ? '日本' : 'グローバル'}</button>)}</div>
           <div className="filter-group topic-filter"><span>テーマ</span>{topics.map((item) => <button className={topic === item ? 'active' : ''} onClick={() => { setTopic(item); resetPage(); }} key={item}>{item}</button>)}</div>
           <button className="knowledge-link" onClick={showKnowledge}><Icon name="map" size={16} />24の問いを開く<Icon name="chevron" size={14} /></button>
         </aside>

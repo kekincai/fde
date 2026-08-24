@@ -4,7 +4,7 @@ import { formatDate, type Overview } from './model';
 type Props = {
   overview: Overview;
   onKnowledge: () => void;
-  onAction: () => void;
+  onSignals: () => void;
 };
 
 const fieldLoop = [
@@ -21,7 +21,7 @@ const radarProcess = [
   ['判断', '顧客・事業への影響、根拠、優先度、次に確認することを提示します。']
 ];
 
-export default function AboutFde({ overview, onKnowledge, onAction }: Props) {
+export default function AboutFde({ overview, onKnowledge, onSignals }: Props) {
   return <main className="about-page" id="top">
     <section className="fde-definition" aria-labelledby="fde-definition-title">
       <div>
@@ -71,7 +71,7 @@ export default function AboutFde({ overview, onKnowledge, onAction }: Props) {
       <div><span>次に読む</span><h2 id="next-title">理解してから、情報を読む。</h2><p>先に全体像をつかむか、今日の判断材料へ進んでください。</p></div>
       <div className="about-next-actions">
         <button onClick={onKnowledge}><span>01</span><b>ナレッジマップ</b><small>顧客課題から定着まで、24の問いで全体像を見る</small><Icon name="chevron" size={16} /></button>
-        <button onClick={onAction}><span>02</span><b>アクション</b><small>収集したシグナルから、次に確認・検証することを読む</small><Icon name="chevron" size={16} /></button>
+        <button onClick={onSignals}><span>02</span><b>収集情報</b><small>収集したシグナルから、次に確認・検証することを読む</small><Icon name="chevron" size={16} /></button>
       </div>
     </section>
   </main>;

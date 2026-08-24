@@ -16,7 +16,7 @@ type AdminData = {
   error?: string;
 };
 
-const sectionLabels: Record<string, string> = { about: 'FDEとは', action: 'アクション', japan: '日本', research: 'リサーチ', saved: '保存済み', admin: '管理' };
+const sectionLabels: Record<string, string> = { about: 'FDEとは', action: '収集情報', japan: '日本', research: 'リサーチ', saved: '保存済み', admin: '管理' };
 const deviceLabels: Record<string, string> = { desktop: 'デスクトップ', tablet: 'タブレット', mobile: 'モバイル' };
 const number = (value?: number) => new Intl.NumberFormat('ja-JP').format(Number(value ?? 0));
 
