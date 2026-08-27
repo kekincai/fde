@@ -450,7 +450,7 @@ app.post('/api/articles/:articleId/open', async (c) => {
 app.post('/api/analytics/events', async (c) => {
   if (!sameOrigin(c.req.raw)) return c.json({ ok: false }, 403);
   const payload = await c.req.json().catch(() => ({})) as {
-    eventName?: string; visitorId?: string; articleId?: string; section?: string; deviceType?: string;
+    eventName?: string; visitorId?: string; sessionId?: string; articleId?: string; section?: string; deviceType?: string; referrerHost?: string;
   };
   const allowedEvents = new Set(['page_view', 'section_view', 'article_open', 'source_click', 'bookmark_save', 'bookmark_remove']);
   const allowedSections = new Set(['about', 'action', 'japan', 'research', 'saved', 'admin']);
@@ -459,14 +459,21 @@ app.post('/api/analytics/events', async (c) => {
   const section = allowedSections.has(payload.section ?? '') ? payload.section! : '';
   const deviceType = allowedDevices.has(payload.deviceType ?? '') ? payload.deviceType! : 'desktop';
   const visitorId = cleanText(payload.visitorId ?? '').slice(0, 80);
+  const sessionId = cleanText(payload.sessionId ?? '').slice(0, 80);
+  const rawReferrer = cleanText(payload.referrerHost ?? '').toLowerCase().slice(0, 120);
+  const referrerHost = /^(direct|self|[a-z0-9.-]+)$/.test(rawReferrer) ? rawReferrer : '';
   const articleId = cleanText(payload.articleId ?? '').slice(0, 80) || null;
   const session = await readSession(c.env, getCookie(c, SESSION_COOKIE));
   try {
+    const metadata = JSON.stringify({
+      sessionIdHash: sessionId ? await sha256(sessionId) : '',
+      referrerHost: payload.eventName === 'page_view' ? referrerHost : ''
+    });
     await c.env.DB.prepare(
       `INSERT INTO analytics_events
-       (id, event_name, user_id, anonymous_id_hash, article_id, section, device_type)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    ).bind(crypto.randomUUID(), payload.eventName, session?.userId ?? null, visitorId ? await sha256(visitorId) : '', articleId, section, deviceType).run();
+       (id, event_name, user_id, anonymous_id_hash, article_id, section, device_type, metadata)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(crypto.randomUUID(), payload.eventName, session?.userId ?? null, visitorId ? await sha256(visitorId) : '', articleId, section, deviceType, metadata).run();
     return c.json({ ok: true });
   } catch {
     return c.json({ ok: false }, 400);
@@ -479,69 +486,131 @@ app.get('/api/admin/analytics', async (c) => {
   if (!session.isAdmin) return c.json({ error: '管理者権限が必要です。' }, 403);
   const requestedDays = Number(c.req.query('days') ?? 30);
   const days = [7, 30, 90].includes(requestedDays) ? requestedDays : 30;
-  const since = `-${days} days`;
+  const currentStart = `-${days - 1} days`;
+  const previousStart = `-${days * 2 - 1} days`;
   try {
-    const [metrics, users, trend, popularArticles, sections, devices, ingest, sourceHealth] = await Promise.all([
+    const [metrics, users, trend, popularArticles, sections, devices, referrers, timeBands, ingest, inventory, sourceHealth] = await Promise.all([
       c.env.DB.prepare(
-        `SELECT
-          SUM(CASE WHEN event_name = 'page_view' THEN 1 ELSE 0 END) AS page_views,
-          SUM(CASE WHEN event_name = 'article_open' THEN 1 ELSE 0 END) AS article_opens,
-          SUM(CASE WHEN event_name = 'source_click' THEN 1 ELSE 0 END) AS source_clicks,
-          SUM(CASE WHEN event_name = 'bookmark_save' THEN 1 ELSE 0 END) AS bookmark_saves,
-          COUNT(DISTINCT CASE WHEN user_id IS NOT NULL THEN user_id ELSE anonymous_id_hash END) AS visitors
-         FROM analytics_events WHERE occurred_at >= datetime('now', ?)`
-      ).bind(since).first(),
+        `WITH bounds AS (
+           SELECT datetime('now', ?, 'start of day', '-9 hours') AS current_start,
+                  datetime('now', ?, 'start of day', '-9 hours') AS previous_start
+         )
+         SELECT
+          SUM(CASE WHEN occurred_at >= current_start AND event_name = 'page_view' THEN 1 ELSE 0 END) AS page_views,
+          SUM(CASE WHEN occurred_at >= current_start AND event_name = 'article_open' THEN 1 ELSE 0 END) AS article_opens,
+          SUM(CASE WHEN occurred_at >= current_start AND event_name = 'source_click' THEN 1 ELSE 0 END) AS source_clicks,
+          SUM(CASE WHEN occurred_at >= current_start AND event_name = 'bookmark_save' THEN 1 ELSE 0 END) AS bookmark_saves,
+          COUNT(DISTINCT CASE WHEN occurred_at >= current_start THEN CASE WHEN user_id IS NOT NULL THEN user_id ELSE anonymous_id_hash END END) AS visitors,
+          COUNT(DISTINCT CASE WHEN occurred_at >= current_start AND json_extract(metadata, '$.sessionIdHash') != '' THEN json_extract(metadata, '$.sessionIdHash') END) AS sessions,
+          SUM(CASE WHEN occurred_at < current_start AND event_name = 'page_view' THEN 1 ELSE 0 END) AS previous_page_views,
+          SUM(CASE WHEN occurred_at < current_start AND event_name = 'article_open' THEN 1 ELSE 0 END) AS previous_article_opens,
+          SUM(CASE WHEN occurred_at < current_start AND event_name = 'source_click' THEN 1 ELSE 0 END) AS previous_source_clicks,
+          COUNT(DISTINCT CASE WHEN occurred_at < current_start THEN CASE WHEN user_id IS NOT NULL THEN user_id ELSE anonymous_id_hash END END) AS previous_visitors,
+          MIN(CASE WHEN occurred_at >= current_start THEN occurred_at END) AS first_event_at,
+          MAX(CASE WHEN occurred_at >= current_start THEN occurred_at END) AS last_event_at
+         FROM analytics_events, bounds WHERE occurred_at >= previous_start`
+      ).bind(currentStart, previousStart).first(),
       c.env.DB.prepare(
         `SELECT COUNT(*) AS total_users,
-          SUM(CASE WHEN created_at >= datetime('now', ?) THEN 1 ELSE 0 END) AS new_users
+          SUM(CASE WHEN created_at >= datetime('now', ?, 'start of day', '-9 hours') THEN 1 ELSE 0 END) AS new_users
          FROM users`
-      ).bind(since).first(),
+      ).bind(currentStart).first(),
       c.env.DB.prepare(
-        `SELECT date(occurred_at) AS day,
-          SUM(CASE WHEN event_name = 'page_view' THEN 1 ELSE 0 END) AS page_views,
-          SUM(CASE WHEN event_name = 'article_open' THEN 1 ELSE 0 END) AS article_opens,
-          SUM(CASE WHEN event_name = 'bookmark_save' THEN 1 ELSE 0 END) AS bookmark_saves
-         FROM analytics_events WHERE occurred_at >= datetime('now', ?)
-         GROUP BY date(occurred_at) ORDER BY day`
-      ).bind(since).all(),
+        `WITH RECURSIVE dates(day) AS (
+           SELECT date('now', '+9 hours', ?)
+           UNION ALL SELECT date(day, '+1 day') FROM dates WHERE day < date('now', '+9 hours')
+         ), daily AS (
+           SELECT date(occurred_at, '+9 hours') AS day,
+             SUM(event_name = 'page_view') AS page_views,
+             SUM(event_name = 'article_open') AS article_opens,
+             SUM(event_name = 'source_click') AS source_clicks,
+             COUNT(DISTINCT CASE WHEN user_id IS NOT NULL THEN user_id ELSE anonymous_id_hash END) AS visitors
+           FROM analytics_events WHERE occurred_at >= datetime('now', ?, 'start of day', '-9 hours')
+           GROUP BY date(occurred_at, '+9 hours')
+         )
+         SELECT dates.day, COALESCE(page_views, 0) AS page_views,
+           COALESCE(article_opens, 0) AS article_opens, COALESCE(source_clicks, 0) AS source_clicks,
+           COALESCE(visitors, 0) AS visitors
+         FROM dates LEFT JOIN daily USING(day) ORDER BY dates.day`
+      ).bind(currentStart, currentStart).all(),
       c.env.DB.prepare(
         `SELECT a.id, a.title, s.name AS source_name,
           SUM(CASE WHEN e.event_name = 'article_open' THEN 1 ELSE 0 END) AS opens,
           SUM(CASE WHEN e.event_name = 'source_click' THEN 1 ELSE 0 END) AS source_clicks,
-          SUM(CASE WHEN e.event_name = 'bookmark_save' THEN 1 ELSE 0 END) AS saves
+          SUM(CASE WHEN e.event_name = 'bookmark_save' THEN 1 ELSE 0 END) AS saves,
+          COUNT(DISTINCT CASE WHEN e.user_id IS NOT NULL THEN e.user_id ELSE e.anonymous_id_hash END) AS readers
          FROM analytics_events e JOIN articles a ON a.id = e.article_id JOIN sources s ON s.id = a.source_id
-         WHERE e.occurred_at >= datetime('now', ?)
+         WHERE e.occurred_at >= datetime('now', ?, 'start of day', '-9 hours')
          GROUP BY a.id, a.title, s.name ORDER BY (opens + source_clicks + saves) DESC LIMIT 8`
-      ).bind(since).all(),
+      ).bind(currentStart).all(),
       c.env.DB.prepare(
-        `SELECT section, COUNT(*) AS views FROM analytics_events
-         WHERE event_name IN ('page_view', 'section_view') AND occurred_at >= datetime('now', ?) AND section != ''
+        `SELECT section, COUNT(*) AS views,
+          COUNT(DISTINCT CASE WHEN user_id IS NOT NULL THEN user_id ELSE anonymous_id_hash END) AS visitors
+         FROM analytics_events
+         WHERE event_name IN ('page_view', 'section_view') AND occurred_at >= datetime('now', ?, 'start of day', '-9 hours') AND section != ''
          GROUP BY section ORDER BY views DESC`
-      ).bind(since).all(),
+      ).bind(currentStart).all(),
       c.env.DB.prepare(
-        `SELECT device_type, COUNT(*) AS views FROM analytics_events
-         WHERE event_name = 'page_view' AND occurred_at >= datetime('now', ?)
+        `SELECT device_type, COUNT(*) AS views,
+          COUNT(DISTINCT CASE WHEN user_id IS NOT NULL THEN user_id ELSE anonymous_id_hash END) AS visitors
+         FROM analytics_events
+         WHERE event_name = 'page_view' AND occurred_at >= datetime('now', ?, 'start of day', '-9 hours')
          GROUP BY device_type ORDER BY views DESC`
-      ).bind(since).all(),
+      ).bind(currentStart).all(),
+      c.env.DB.prepare(
+        `SELECT CASE
+           WHEN json_extract(metadata, '$.referrerHost') = 'direct' THEN 'direct'
+           WHEN json_extract(metadata, '$.referrerHost') = 'self' THEN 'self'
+           WHEN COALESCE(json_extract(metadata, '$.referrerHost'), '') = '' THEN 'unknown'
+           ELSE json_extract(metadata, '$.referrerHost') END AS referrer,
+          COUNT(*) AS views,
+          COUNT(DISTINCT CASE WHEN user_id IS NOT NULL THEN user_id ELSE anonymous_id_hash END) AS visitors
+         FROM analytics_events
+         WHERE event_name = 'page_view' AND occurred_at >= datetime('now', ?, 'start of day', '-9 hours')
+         GROUP BY referrer ORDER BY views DESC LIMIT 8`
+      ).bind(currentStart).all(),
+      c.env.DB.prepare(
+        `SELECT CASE
+           WHEN CAST(strftime('%H', occurred_at, '+9 hours') AS INTEGER) < 6 THEN '0–5時'
+           WHEN CAST(strftime('%H', occurred_at, '+9 hours') AS INTEGER) < 12 THEN '6–11時'
+           WHEN CAST(strftime('%H', occurred_at, '+9 hours') AS INTEGER) < 18 THEN '12–17時'
+           ELSE '18–23時' END AS time_band,
+          COUNT(*) AS views,
+          COUNT(DISTINCT CASE WHEN user_id IS NOT NULL THEN user_id ELSE anonymous_id_hash END) AS visitors
+         FROM analytics_events
+         WHERE event_name = 'page_view' AND occurred_at >= datetime('now', ?, 'start of day', '-9 hours')
+         GROUP BY time_band ORDER BY MIN(CAST(strftime('%H', occurred_at, '+9 hours') AS INTEGER))`
+      ).bind(currentStart).all(),
       c.env.DB.prepare(
         `SELECT COUNT(*) AS runs,
           SUM(CASE WHEN status IN ('success', 'not_modified') THEN 1 ELSE 0 END) AS successful_runs,
           SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS failed_runs,
           SUM(unique_count) AS new_articles
-         FROM fetch_runs WHERE started_at >= datetime('now', ?)`
-      ).bind(since).first(),
+         FROM fetch_runs WHERE started_at >= datetime('now', ?, 'start of day', '-9 hours')`
+      ).bind(currentStart).first(),
       c.env.DB.prepare(
-        `SELECT name, last_success_at, last_error_at, consecutive_failures
-         FROM sources WHERE allowed_fetch = 1 ORDER BY consecutive_failures DESC, name LIMIT 8`
+        `SELECT
+          SUM(status = 'published') AS published_articles,
+          SUM(status = 'suppressed') AS suppressed_articles,
+          COUNT(DISTINCT CASE WHEN status = 'published' THEN source_id END) AS active_sources,
+          MAX(CASE WHEN status = 'published' THEN created_at END) AS latest_article_at
+         FROM articles`
+      ).first(),
+      c.env.DB.prepare(
+        `SELECT id, name, last_success_at, last_error_at, consecutive_failures, backoff_until
+         FROM sources WHERE allowed_fetch = 1
+         ORDER BY consecutive_failures DESC, COALESCE(last_success_at, '') ASC, name LIMIT 12`
       ).all()
     ]);
     const ingestRuns = Number((ingest as { runs?: number } | null)?.runs ?? 0);
     const successfulRuns = Number((ingest as { successful_runs?: number } | null)?.successful_runs ?? 0);
     return c.json({
       days, metrics, users, trend: trend.results, popularArticles: popularArticles.results,
-      sections: sections.results, devices: devices.results,
+      sections: sections.results, devices: devices.results, referrers: referrers.results,
+      timeBands: timeBands.results, inventory,
       ingest: { ...ingest, successRate: ingestRuns ? Math.round(successfulRuns / ingestRuns * 1000) / 10 : 100 },
-      sourceHealth: sourceHealth.results, measuredSince: new Date(Date.now() - days * 86_400_000).toISOString()
+      sourceHealth: sourceHealth.results, measuredSince: new Date(Date.now() - (days - 1) * 86_400_000).toISOString(),
+      timezone: 'Asia/Tokyo'
     });
   } catch (error) {
     return c.json({ error: errorMessage(error) }, 503);

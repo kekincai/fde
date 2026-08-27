@@ -18,10 +18,37 @@ function deviceType(): 'desktop' | 'tablet' | 'mobile' {
   return 'desktop';
 }
 
+function sessionId(): string {
+  const key = 'fde-radar-session';
+  try {
+    const existing = sessionStorage.getItem(key);
+    if (existing) return existing;
+    const value = crypto.randomUUID();
+    sessionStorage.setItem(key, value);
+    return value;
+  } catch { return ''; }
+}
+
+function referrerHost(): string {
+  try {
+    if (!document.referrer) return 'direct';
+    const host = new URL(document.referrer).hostname.toLowerCase();
+    return host === window.location.hostname.toLowerCase() ? 'self' : host;
+  } catch { return ''; }
+}
+
 export function track(eventName: AnalyticsEvent, section: AnalyticsSection, articleId?: string): void {
   if (navigator.doNotTrack === '1') return;
   try {
-    const body = JSON.stringify({ eventName, section, articleId, visitorId: visitorId(), deviceType: deviceType() });
+    const body = JSON.stringify({
+      eventName,
+      section,
+      articleId,
+      visitorId: visitorId(),
+      sessionId: sessionId(),
+      deviceType: deviceType(),
+      referrerHost: eventName === 'page_view' ? referrerHost() : undefined
+    });
     fetch('/api/analytics/events', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body, keepalive: true
     }).catch(() => undefined);
