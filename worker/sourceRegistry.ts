@@ -11,6 +11,7 @@ export type SourceRecord = {
   homepage: string;
   feedUrl?: string;
   apiUrl?: string;
+  backfillUrl?: string;
   fetchMode: 'api' | 'rss' | 'html';
   parseMode?: 'listing' | 'page';
   language: 'ja' | 'en';
@@ -138,7 +139,10 @@ export const sourceRegistry: SourceRecord[] = [
   { id: 'zenn-enterprise-ai', name: 'Zenn', homepage: 'https://zenn.dev/topics/%E7%94%9F%E6%88%90ai', feedUrl: 'https://zenn.dev/topics/%E7%94%9F%E6%88%90ai/feed', fetchMode: 'rss', language: 'ja', country: 'JP', kind: 'community', contentType: 'blog', defaultPillar: 'Japan', sourceTier: 3, weight: 75, minScore: 55, priority: 75, pollIntervalMinutes: 360, backfillPages: 1, backfillMode: 'feed-window' },
   { id: 'yahoo-japan-it', name: 'Yahoo!ニュース IT', homepage: 'https://news.yahoo.co.jp/categories/it', feedUrl: 'https://news.yahoo.co.jp/rss/topics/it.xml', fetchMode: 'rss', language: 'ja', country: 'JP', kind: 'media', contentType: 'news', defaultPillar: 'Japan', sourceTier: 3, weight: 70, minScore: 58, priority: 70, pollIntervalMinutes: 180, backfillPages: 1, backfillMode: 'feed-window' },
 
-  { id: 'arxiv-fde-research', name: 'arXiv FDE-adjacent', homepage: 'https://arxiv.org/', feedUrl: 'https://export.arxiv.org/api/query?search_query=%28all%3A%22agent%20evaluation%22%20OR%20all%3A%22prompt%20injection%22%20OR%20all%3A%22production%20RAG%22%20OR%20all%3A%22enterprise%20AI%20agent%22%29&sortBy=submittedDate&sortOrder=descending&max_results=15', fetchMode: 'rss', language: 'en', country: 'GLOBAL', kind: 'research', contentType: 'paper', defaultPillar: 'Build', sourceTier: 2, weight: 86, minScore: 58, priority: 72, pollIntervalMinutes: 1440, backfillPages: 3, backfillMode: 'api-page', stream: 'research', semanticPolicy: 'required', dailyItemCap: 5 },
+  // The search API intermittently rate-limits shared Workers egress. Use the
+  // official daily, CDN-cached subject feed for scheduled collection and keep
+  // the query endpoint only for explicit historical backfills.
+  { id: 'arxiv-fde-research', name: 'arXiv FDE-adjacent', homepage: 'https://arxiv.org/', feedUrl: 'https://rss.arxiv.org/rss/cs.AI+cs.CR+cs.CL+cs.SE', backfillUrl: 'https://export.arxiv.org/api/query?search_query=%28all%3A%22agent%20evaluation%22%20OR%20all%3A%22prompt%20injection%22%20OR%20all%3A%22production%20RAG%22%20OR%20all%3A%22enterprise%20AI%20agent%22%29&sortBy=submittedDate&sortOrder=descending&max_results=15', fetchMode: 'rss', language: 'en', country: 'GLOBAL', kind: 'research', contentType: 'paper', defaultPillar: 'Build', sourceTier: 2, weight: 86, minScore: 58, priority: 72, pollIntervalMinutes: 1440, backfillPages: 3, backfillMode: 'api-page', stream: 'research', semanticPolicy: 'required', dailyItemCap: 5, includeTerms: ['agent evaluation', 'agent benchmark', 'agent reliability', 'agent safety', 'human oversight', 'prompt injection', 'RAG evaluation', 'retrieval evaluation', 'production RAG', 'enterprise agent', 'tool security', 'agent observability'] },
   { id: 'stanford-ai-index', name: 'Stanford AI Index', homepage: 'https://hai.stanford.edu/ai-index', fetchMode: 'html', parseMode: 'page', language: 'en', country: 'GLOBAL', kind: 'report', contentType: 'report', defaultPillar: 'Organization', sourceTier: 1, weight: 94, minScore: 40, priority: 86, pollIntervalMinutes: 1440 },
 
   { id: 'youtube-openai', name: 'OpenAI YouTube', homepage: 'https://www.youtube.com/@OpenAI', feedUrl: youtubeFeed('UCXZCJLdBC09xxGZ6gcdrc6A'), fetchMode: 'rss', language: 'en', country: 'GLOBAL', kind: 'video', contentType: 'video', defaultPillar: 'Build', sourceTier: 1, weight: 92, minScore: 58, priority: 84, pollIntervalMinutes: 360, backfillPages: 1, backfillMode: 'feed-window' },

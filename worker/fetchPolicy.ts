@@ -12,8 +12,8 @@ export function isPermanentFetchFailure(failure: FetchFailureLike): boolean {
   return failure.status === 401 || failure.status === 403;
 }
 
-export function sourceBackoffSeconds(failure: FetchFailureLike, attempts: number): number {
+export function sourceBackoffSeconds(failure: FetchFailureLike, attempts: number, minimumSeconds = 60): number {
   if (isPermanentFetchFailure(failure)) return 7 * 86_400;
-  if (failure.retryAfterSeconds !== undefined) return Math.max(60, failure.retryAfterSeconds);
-  return Math.min(86_400, 60 * 2 ** Math.min(Math.max(1, attempts), 11));
+  if (failure.retryAfterSeconds !== undefined) return Math.max(minimumSeconds, failure.retryAfterSeconds);
+  return Math.max(minimumSeconds, Math.min(86_400, 60 * 2 ** Math.min(Math.max(1, attempts), 11)));
 }

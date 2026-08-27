@@ -24,3 +24,7 @@ test('honors retry-after and caps transient exponential backoff at one day', () 
   assert.equal(sourceBackoffSeconds({ status: 429, retryAfterSeconds: 900 }, 1), 900);
   assert.equal(sourceBackoffSeconds({ status: 500 }, 20), 86_400);
 });
+
+test('allows rate-sensitive sources to enforce a longer minimum backoff', () => {
+  assert.equal(sourceBackoffSeconds({ status: 429, retryAfterSeconds: 240 }, 2, 21_600), 21_600);
+});

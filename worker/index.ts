@@ -728,6 +728,7 @@ async function readSources(env: Env, sourceIds?: string[], force = false): Promi
           parseMode: registrySource?.parseMode,
           backfillPages: registrySource?.backfillPages,
           backfillMode: registrySource?.backfillMode,
+          backfillUrl: registrySource?.backfillUrl,
           stream: registrySource ? collectionStreamFor(registrySource) : 'production-pattern',
           semanticPolicy: registrySource?.semanticPolicy ?? 'required',
           dailyItemCap: registrySource?.dailyItemCap ?? 20,
@@ -781,9 +782,10 @@ async function syncSourceRegistry(env: Env): Promise<void> {
 }
 
 async function fetchSourceItems(source: SourceRecord, options: IngestOptions): Promise<{ items: DiscoveredItem[]; meta: FetchMeta }> {
+  const rssUrl = options.mode === 'backfill' && source.backfillUrl ? source.backfillUrl : source.feedUrl;
   const candidates = [
     { mode: 'api' as const, url: source.apiUrl },
-    { mode: 'rss' as const, url: source.feedUrl },
+    { mode: 'rss' as const, url: rssUrl },
     { mode: 'html' as const, url: source.fetchMode === 'html' ? source.homepage : undefined }
   ].filter((candidate): candidate is { mode: SourceRecord['fetchMode']; url: string } => Boolean(candidate.url));
   let lastError: FetchFailure | undefined;
@@ -797,7 +799,7 @@ async function fetchSourceItems(source: SourceRecord, options: IngestOptions): P
       const discovered = candidate.mode === 'api'
         ? await parseApiResponse(source, result.response)
         : candidate.mode === 'rss'
-          ? await parseRssResponse(source, result.response, options.mode === 'backfill' ? 1_500 : 60)
+          ? await parseRssResponse(source, result.response, options.mode === 'backfill' || source.id === 'arxiv-fde-research' ? 1_500 : 60)
           : await parseHtmlResponse(source, result.response);
       let window = discovered;
       if (options.mode === 'backfill') {
@@ -853,7 +855,7 @@ function buildBackfillUrl(source: SourceRecord, rawUrl: string, options: IngestO
     url.searchParams.set('query', `(${baseQuery}) created:>=${sinceDay}`);
     url.searchParams.set('per_page', '100');
     url.searchParams.set('page', String(page));
-  } else if (source.id === 'arxiv-fde-research') {
+  } else if (source.id === 'arxiv-fde-research' && url.pathname.includes('/api/query')) {
     url.searchParams.set('start', String((page - 1) * 100));
     url.searchParams.set('max_results', '100');
   } else if (source.backfillMode === 'feed-page') {
@@ -933,6 +935,7 @@ async function parseRssResponse(source: SourceRecord, response: Response, maxEnt
     const haystack = `${title} ${rawSummary} ${tags.join(' ')}`;
     const score = scoreFde(haystack, false);
     if (!link || !title) return [];
+    if (source.includeTerms?.length && !source.includeTerms.some((term) => haystack.toLowerCase().includes(term.toLowerCase()))) return [];
     if (!AI_PATTERN.test(haystack) && !ROLE_PATTERN.test(haystack) && source.kind !== 'report') return [];
     if (source.kind === 'community' && !passesCommunityGate(title, haystack)) return [];
     if (source.id === 'yahoo-japan-it' && !(AI_PATTERN.test(title) && FIELD_PATTERN.test(haystack) && (DELIVERY_PATTERN.test(haystack) || QUALITY_PATTERN.test(haystack)))) return [];
@@ -1621,7 +1624,8 @@ async function markSourceSuccess(env: Env, source: SourceRecord, meta: FetchMeta
 
 async function markSourceFailure(env: Env, source: SourceRecord, failure: FetchFailure): Promise<void> {
   const attempts = (source.consecutiveFailures ?? 0) + 1;
-  const delaySeconds = sourceBackoffSeconds(failure, attempts);
+  const minimumSeconds = source.id === 'arxiv-fde-research' && failure.status === 429 ? 6 * 3_600 : 60;
+  const delaySeconds = sourceBackoffSeconds(failure, attempts, minimumSeconds);
   await env.DB.prepare(
     `UPDATE sources SET last_error_at = ?, consecutive_failures = ?, backoff_until = ?,
      updated_at = CURRENT_TIMESTAMP WHERE id = ?`

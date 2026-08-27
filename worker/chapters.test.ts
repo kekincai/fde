@@ -30,3 +30,11 @@ test('gives every chapter at least three configured sources', () => {
     assert.ok(sources.length >= 3, `${chapter.id} only has ${sources.length} sources`);
   }
 });
+
+test('uses the cached arXiv subject feed for scheduled research collection', () => {
+  const source = sourceRegistry.find((item) => item.id === 'arxiv-fde-research');
+  assert.ok(source);
+  assert.match(source.feedUrl ?? '', /^https:\/\/rss\.arxiv\.org\/rss\//);
+  assert.match(source.backfillUrl ?? '', /export\.arxiv\.org\/api\/query/);
+  assert.ok((source.includeTerms?.length ?? 0) >= 8);
+});
