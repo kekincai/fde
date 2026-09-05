@@ -105,7 +105,7 @@ export default function RadarApp() {
       ? '背景を理解する'
       : region === 'Japan'
         ? '日本のAI導入シグナル'
-        : 'フィールド・インテリジェンス';
+        : chapter ? coverage.find((item) => item.id === chapter)?.titleJa ?? '収集情報' : '収集情報';
   const workspaceIcon: IconName = channel === 'saved' ? 'bookmark' : channel === 'research' ? 'flask' : region === 'Japan' ? 'mapPin' : 'radar';
 
   function resetPage() {

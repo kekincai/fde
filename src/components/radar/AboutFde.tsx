@@ -32,20 +32,22 @@ export default function AboutFde({ overview, onKnowledge, onSignals }: Props) {
   return <main className="about-page" id="top">
     <section className="fde-definition" aria-labelledby="fde-definition-title">
       <div>
-        <div className="definition-kicker"><Icon name="userCode" size={20} />FORWARD DEPLOYED ENGINEER</div>
-        <h1 id="fde-definition-title">FDEとは、顧客の現場で<br />AIを本番の成果に変える<br />フォワード・デプロイド・エンジニアです。</h1>
+        <div className="definition-kicker">FIELD NOTES / AI IMPLEMENTATION</div>
+        <h1 id="fde-definition-title">AIと、現場のあいだ。<br /><span>実装を、成果へ。</span></h1>
         <p><b>FDE は Forward Deployed Engineer の略です。</b> 顧客チームと並走し、課題発見、技術要件の定義、システム設計、実装、評価、本番導入、利用定着までを端から端まで担います。</p>
+        <div className="intro-actions"><button onClick={onSignals}>収集情報を読む<Icon name="arrowRight" size={18} /></button><button onClick={onKnowledge}>24の問いから探す<Icon name="map" size={18} /></button></div>
+        <p className="intro-caption">FDE RADAR は、AIの現場導入を考える人のための情報ガイドです。</p>
       </div>
       <aside className="about-status" aria-label="FDE Radar の収集状況">
-        <span>FDE RADAR</span>
-        <b><Icon name="book" size={24} />24<small>の実務の問い</small></b>
-        <div><i className="live-dot" />6時間ごとに自動収集</div>
-        <small>最終更新 {formatDate(overview.last_ingested_at)}</small>
+        <span>THE FIELD LOOP</span>
+        <div className="field-route">{roleDimensions.map((item, index) => <div key={item.title}><span className="route-index">0{index + 1}</span><Icon name={item.icon} size={24} /><div><b>{item.title}</b><small>{item.copy}</small></div><Icon name="arrowRight" size={16} /></div>)}</div>
+        <div className="route-return"><Icon name="arrowsExchange" size={17} />現場の学びを、次の実装へ。</div>
+        <div className="intro-live"><i className="live-dot" />6時間ごとに自動収集<small>更新 {formatDate(overview.last_ingested_at)}</small></div>
       </aside>
     </section>
 
     <section className="about-section role-boundary">
-      <header className="section-heading"><Icon name="target" size={32} /><div><span>役割</span><h2>技術を作るだけでも、<br />提案するだけでもない。</h2><p>顧客成果と技術実装をつなぐ責任</p></div></header>
+      <header className="section-heading"><Icon name="target" size={32} /><div><span>01 / FDEとは</span><h2>顧客の課題から、<br />本番の成果まで。</h2><p>顧客成果と技術実装をつなぐ責任</p></div></header>
       <div>
         <p>FDEは、顧客と技術の間に立つだけの調整役ではありません。顧客の成果に責任を持ちながら、自ら技術判断と実装を行い、曖昧な課題を安定した本番システムへ変えます。</p>
         <dl>{roleDimensions.map((dimension) => <div key={dimension.title}><dt><Icon name={dimension.icon} size={20} />{dimension.title}</dt><dd>{dimension.copy}</dd></div>)}</dl>

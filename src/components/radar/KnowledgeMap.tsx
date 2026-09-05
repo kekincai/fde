@@ -44,14 +44,15 @@ const coverageText = (chapter: CoverageChapter) => chapter.publishedCount > 0
 export default function KnowledgeMap({ coverage, selectedChapter, onSelect }: Props) {
   return <section className="knowledge-page" aria-labelledby="knowledge-title">
     <header className="knowledge-head">
-      <div className="knowledge-title"><Icon name="map" size={38} /><div><h1 id="knowledge-title">現場導入を、24の問いで読む。</h1><p>顧客課題から組織定着まで、知りたい問いを選ぶと関連する一次情報へ進めます。</p></div></div>
+      <div className="knowledge-title"><Icon name="map" size={38} /><div><h1 id="knowledge-title">AI導入を、24の問いで。</h1><p>顧客課題から組織定着まで、知りたい問いを選ぶと関連する一次情報へ進めます。</p></div></div>
       <strong><Icon name="book" size={23} />{coverage.length}<small>の実務の問い</small></strong>
     </header>
-    <div className="chapter-columns">{chapterPillars.map((chapterPillar) => <section key={chapterPillar}>
-      <h2><Icon name={pillarIcons[chapterPillar]} size={21} />{pillarLabels[chapterPillar]}</h2>
+    <div className="chapter-columns">{chapterPillars.map((chapterPillar, index) => <section key={chapterPillar}>
+      <h2><span className="chapter-number">0{index + 1}</span><Icon name={pillarIcons[chapterPillar]} size={24} /><span>{pillarLabels[chapterPillar]}<small>{chapterPillar}</small></span></h2>
+      <div className="chapter-items">
       {coverage.filter((item) => item.pillar === chapterPillar).map((item) => <button key={item.id} className={selectedChapter === item.id ? 'active' : ''} onClick={() => onSelect(item)} aria-label={`${item.titleJa}。${item.questionJa}。${coverageText(item)}`}>
         <span className="chapter-symbol"><Icon name={chapterIcons[item.id] ?? 'compass'} size={19} /></span><span className="chapter-copy"><b>{item.titleJa}</b><small>{item.questionJa}</small><em>{coverageText(item)}</em></span>
-      </button>)}
+      </button>)}</div>
     </section>)}</div>
   </section>;
 }
