@@ -1885,7 +1885,11 @@ const worker = {
   async queue(batch: MessageBatch<IngestMessage>, env: Env) {
     for (const message of batch.messages) {
       const mode = message.body.reason ?? 'scheduled';
-      const sources = await readSources(env, message.body.sourceIds, mode !== 'scheduled');
+      // The dispatcher already applies polling and backoff eligibility. Once a
+      // source has been queued, force the explicit source lookup so a Queue
+      // retry is not silently filtered by the backoff written by its first
+      // failed attempt.
+      const sources = await readSources(env, message.body.sourceIds, true);
       const retryableFailures: string[] = [];
       const permanentFailures: string[] = [];
       for (const source of sources) {
@@ -1894,7 +1898,8 @@ const worker = {
         }
         catch (error) {
           const message = `${source.id}: ${errorMessage(error)}`;
-          if (isPermanentFetchFailure(error as FetchFailure)) permanentFailures.push(message);
+          const attempts = (source.consecutiveFailures ?? 0) + 1;
+          if (isPermanentFetchFailure(error as FetchFailure, attempts)) permanentFailures.push(message);
           else retryableFailures.push(message);
         }
       }

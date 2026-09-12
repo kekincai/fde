@@ -9,15 +9,19 @@ test('uses a transparent browser-compatible crawler identity', () => {
   assert.match(FETCH_USER_AGENT, /github\.com\/kekincai\/fde/);
 });
 
-test('does not queue-retry authorization blocks', () => {
+test('only treats repeated access blocks as permanent', () => {
   assert.equal(isPermanentFetchFailure({ status: 401 }), true);
-  assert.equal(isPermanentFetchFailure({ status: 403 }), true);
+  assert.equal(isPermanentFetchFailure({ status: 403 }, 1), false);
+  assert.equal(isPermanentFetchFailure({ status: 403 }, 2), false);
+  assert.equal(isPermanentFetchFailure({ status: 403 }, 3), true);
   assert.equal(isPermanentFetchFailure({ status: 429 }), false);
   assert.equal(isPermanentFetchFailure({ status: 500 }), false);
 });
 
-test('backs off blocked sources for seven days', () => {
-  assert.equal(sourceBackoffSeconds({ status: 403 }, 1), 7 * 86_400);
+test('briefly retries access blocks before a seven day manual-review backoff', () => {
+  assert.equal(sourceBackoffSeconds({ status: 403 }, 1), 120);
+  assert.equal(sourceBackoffSeconds({ status: 403 }, 2), 240);
+  assert.equal(sourceBackoffSeconds({ status: 403 }, 3), 7 * 86_400);
 });
 
 test('honors retry-after and caps transient exponential backoff at one day', () => {
