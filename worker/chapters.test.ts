@@ -38,3 +38,10 @@ test('uses the cached arXiv subject feed for scheduled research collection', () 
   assert.match(source.backfillUrl ?? '', /export\.arxiv\.org\/api\/query/);
   assert.ok((source.includeTerms?.length ?? 0) >= 8);
 });
+
+test('does not repeatedly poll the archived Microsoft customer story', () => {
+  const source = sourceRegistry.find((item) => item.id === 'microsoft-sight-machine-roi');
+  assert.ok(source);
+  assert.equal(source.enabled, false);
+  assert.equal(source.homepage, 'https://www.microsoft.com/en/customers/story/26648-sight-machine-microsoft-foundry');
+});
