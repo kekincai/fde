@@ -12,6 +12,13 @@ export function isPermanentFetchFailure(failure: FetchFailureLike, attempts = 1)
   return failure.status === 401 || (failure.status === 403 && attempts >= 3);
 }
 
+export function isDeferredYoutubeFeedFailure(
+  source: { fetchMode: string; feedUrl?: string }, failure: FetchFailureLike
+): boolean {
+  return failure.status === 404 && source.fetchMode === 'rss'
+    && source.feedUrl?.startsWith('https://www.youtube.com/feeds/videos.xml?') === true;
+}
+
 export function sourceBackoffSeconds(failure: FetchFailureLike, attempts: number, minimumSeconds = 60): number {
   if (isPermanentFetchFailure(failure, attempts)) return 7 * 86_400;
   if (failure.retryAfterSeconds !== undefined) return Math.max(minimumSeconds, failure.retryAfterSeconds);

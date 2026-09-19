@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { FETCH_USER_AGENT, isPermanentFetchFailure, sourceBackoffSeconds } from './fetchPolicy.ts';
+import { FETCH_USER_AGENT, isDeferredYoutubeFeedFailure, isPermanentFetchFailure, sourceBackoffSeconds } from './fetchPolicy.ts';
 
 test('uses a transparent browser-compatible crawler identity', () => {
   assert.match(FETCH_USER_AGENT, /^Mozilla\/5\.0/);
@@ -31,4 +31,13 @@ test('honors retry-after and caps transient exponential backoff at one day', () 
 
 test('allows rate-sensitive sources to enforce a longer minimum backoff', () => {
   assert.equal(sourceBackoffSeconds({ status: 429, retryAfterSeconds: 240 }, 2, 21_600), 21_600);
+});
+
+test('defers intermittent YouTube RSS 404s without hiding other missing resources', () => {
+  const youtube = { fetchMode: 'rss', feedUrl: 'https://www.youtube.com/feeds/videos.xml?channel_id=example' };
+  assert.equal(isDeferredYoutubeFeedFailure(youtube, { status: 404 }), true);
+  assert.equal(isDeferredYoutubeFeedFailure(youtube, { status: 403 }), false);
+  assert.equal(isDeferredYoutubeFeedFailure({ fetchMode: 'rss', feedUrl: 'https://example.com/feed' }, { status: 404 }), false);
+  assert.equal(isDeferredYoutubeFeedFailure({ fetchMode: 'html' }, { status: 404 }), false);
+  assert.equal(sourceBackoffSeconds({ status: 404 }, 1, 21_600), 21_600);
 });

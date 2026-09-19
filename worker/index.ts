@@ -24,7 +24,7 @@ import {
   sendConfigurationTest,
   sendDailyDigest
 } from './emailNotifications';
-import { FETCH_USER_AGENT, isPermanentFetchFailure, sourceBackoffSeconds } from './fetchPolicy';
+import { FETCH_USER_AGENT, isDeferredYoutubeFeedFailure, isPermanentFetchFailure, sourceBackoffSeconds } from './fetchPolicy';
 import { chaptersFor, collectionStreamFor, sourceRegistry, type ContentType, type FdePillar, type SourceKind, type SourceRecord } from './sourceRegistry';
 import { evaluateCandidate, reviewWithWorkersAI, type SemanticDecision } from './intelligence';
 
@@ -909,7 +909,11 @@ async function fetchWithPolicy(source: SourceRecord, url: string, unconditional 
     failure.status = response.status;
     throw failure;
   }
-  if (!response.ok) throw new Error(`${source.name}: HTTP ${response.status}`);
+  if (!response.ok) {
+    const failure = new Error(`${source.name}: HTTP ${response.status}`) as FetchFailure;
+    failure.status = response.status;
+    throw failure;
+  }
   const contentLength = Number(response.headers.get('content-length') ?? 0);
   if (contentLength > MAX_BODY_BYTES) throw new Error(`${source.name}: response exceeds ${MAX_BODY_BYTES} bytes`);
   return { response, etag: response.headers.get('etag'), lastModified: response.headers.get('last-modified') };
@@ -1693,7 +1697,8 @@ async function markSourceSuccess(env: Env, source: SourceRecord, meta: FetchMeta
 
 async function markSourceFailure(env: Env, source: SourceRecord, failure: FetchFailure): Promise<void> {
   const attempts = (source.consecutiveFailures ?? 0) + 1;
-  const minimumSeconds = source.id === 'arxiv-fde-research' && failure.status === 429 ? 6 * 3_600 : 60;
+  const minimumSeconds = (source.id === 'arxiv-fde-research' && failure.status === 429)
+    || isDeferredYoutubeFeedFailure(source, failure) ? 6 * 3_600 : 60;
   const delaySeconds = sourceBackoffSeconds(failure, attempts, minimumSeconds);
   await env.DB.prepare(
     `UPDATE sources SET last_error_at = ?, consecutive_failures = ?, backoff_until = ?,
@@ -1892,6 +1897,7 @@ const worker = {
       const sources = await readSources(env, message.body.sourceIds, true);
       const retryableFailures: string[] = [];
       const permanentFailures: string[] = [];
+      const deferredFailures: string[] = [];
       for (const source of sources) {
         try {
           await ingestSource(env, source, { mode, since: message.body.since, page: message.body.page });
@@ -1900,11 +1906,16 @@ const worker = {
           const message = `${source.id}: ${errorMessage(error)}`;
           const attempts = (source.consecutiveFailures ?? 0) + 1;
           if (isPermanentFetchFailure(error as FetchFailure, attempts)) permanentFailures.push(message);
+          else if (isDeferredYoutubeFeedFailure(source, error as FetchFailure)) deferredFailures.push(message);
           else retryableFailures.push(message);
         }
       }
       if (permanentFailures.length) console.error({
         event: 'ingest_source_manual_review', failures: permanentFailures,
+        occurredAt: new Date().toISOString()
+      });
+      if (deferredFailures.length) console.warn({
+        event: 'ingest_source_deferred', failures: deferredFailures,
         occurredAt: new Date().toISOString()
       });
       if (retryableFailures.length) {
