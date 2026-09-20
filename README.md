@@ -104,7 +104,7 @@ flowchart TB
 | FTS5 | 日本語検索用インデックス | タイトル、要約、タグ、検索トークン |
 | Workers AI | ルールだけでは判定できない候補の意味判定 | 結果は D1 に監査情報として保存 |
 | Queues | Source ごとの非同期実行と再試行 | 一時的な ingest message |
-| KV | 認証レート制限、短期状態 | TTL 付きデータ |
+| KV | 収集・メール通知の短期状態 | TTL 付きデータ |
 | Hyperdrive + PostgreSQL | 許可された構造化取得スナップショット | `fde.source_archives` |
 | R2 | PostgreSQL を使わない構成の任意 fallback | JSON スナップショット |
 
@@ -300,6 +300,7 @@ erDiagram
 | `users` / `passkey_credentials` / `user_sessions` | パスキー認証と権限 |
 | `user_bookmarks` / `user_actions` | 保存と記事行動 |
 | `analytics_events` | 最小限の利用状況分析 |
+| `request_rate_limits` | 認証と匿名分析 API の原子的なリクエスト制限 |
 
 記事の `status` は公開状態を表します。
 
@@ -331,6 +332,8 @@ sequenceDiagram
 ```
 
 メールアドレスとパスワードは収集しません。D1 に保存するのは表示名、WebAuthn 公開鍵、署名 counter、端末種別、セッション token のハッシュです。セッション cookie は `HttpOnly / Secure / SameSite=Lax`、有効期間は30日です。
+
+認証 API は IP と操作種別のハッシュを使って D1 で回数を制限します。匿名分析 API も同じ方式で制限し、受信本文は解析前に 4 KiB で打ち切ります。期限切れの制限レコードは定期収集時に削除します。
 
 新規ユーザーの role は常に `member` です。管理 API は画面表示だけに頼らず、サーバー側で session と `admin` role を再確認します。
 
@@ -444,7 +447,7 @@ npm run build
 4. Workers AI の `AI` binding を設定する。
 5. PostgreSQL を使う場合は `migrations/postgres/0001_archive.sql` を実行し、Hyperdrive を設定する。
 6. R2 fallback を使う場合だけ bucket を作り、`ARCHIVE` binding を有効にする。
-7. ingest の手動 APIと、Resend の通知先を secret で設定する。
+7. ingest の手動 API と、Resend の通知先を secret で設定する。`INGEST_TOKEN` が未設定の場合、手動収集は拒否される。
 8. D1 migration を適用し、deploy する。
 
 ```bash

@@ -25,6 +25,7 @@ import {
   sendDailyDigest
 } from './emailNotifications';
 import { FETCH_USER_AGENT, isDeferredYoutubeFeedFailure, isPermanentFetchFailure, sourceBackoffSeconds } from './fetchPolicy';
+import { BodyTooLargeError, consumeRequestLimit, hasConfiguredBearerToken, isPublicAnalyticsEvent, readLimitedText } from './securityControls';
 import { chaptersFor, collectionStreamFor, sourceRegistry, type ContentType, type FdePillar, type SourceKind, type SourceRecord } from './sourceRegistry';
 import { evaluateCandidate, reviewWithWorkersAI, type SemanticDecision } from './intelligence';
 
@@ -107,6 +108,7 @@ type FetchMeta = {
 type FetchFailure = Error & { status?: number; retryAfterSeconds?: number };
 
 const MAX_BODY_BYTES = 6_000_000;
+const MAX_ANALYTICS_BODY_BYTES = 4_096;
 const SESSION_COOKIE = 'fde_session';
 const SESSION_DAYS = 30;
 const app = new Hono<{ Bindings: Env }>();
@@ -268,11 +270,12 @@ app.post('/api/auth/passkey/register/options', async (c) => {
 
 app.post('/api/auth/passkey/register/verify', async (c) => {
   if (!sameOrigin(c.req.raw)) return c.json({ error: '不正なリクエストです。' }, 403);
+  if (!await allowAuthAttempt(c.env, c.req.raw, 'register-verify')) return c.json({ error: '試行回数が多すぎます。しばらく待ってからお試しください。' }, 429);
   const payload = await c.req.json().catch(() => ({})) as { flowId?: string; response?: RegistrationResponseJSON };
   if (!payload.flowId || !payload.response) return c.json({ error: '登録情報が不足しています。' }, 400);
   const state = await c.env.DB.prepare(
     `SELECT challenge, user_id, display_name, webauthn_user_id FROM auth_challenges
-     WHERE id = ? AND kind = 'register' AND expires_at > CURRENT_TIMESTAMP`
+     WHERE id = ? AND kind = 'register' AND julianday(expires_at) > julianday('now')`
   ).bind(payload.flowId).first<{ challenge: string; user_id: string; display_name: string; webauthn_user_id: string }>();
   if (!state) return c.json({ error: '登録の有効時間が切れました。もう一度お試しください。' }, 400);
   const { rpID, origin } = relyingParty(c.req.raw);
@@ -308,10 +311,11 @@ app.post('/api/auth/passkey/login/options', async (c) => {
 
 app.post('/api/auth/passkey/login/verify', async (c) => {
   if (!sameOrigin(c.req.raw)) return c.json({ error: '不正なリクエストです。' }, 403);
+  if (!await allowAuthAttempt(c.env, c.req.raw, 'login-verify')) return c.json({ error: '試行回数が多すぎます。しばらく待ってからお試しください。' }, 429);
   const payload = await c.req.json().catch(() => ({})) as { flowId?: string; response?: AuthenticationResponseJSON };
   if (!payload.flowId || !payload.response) return c.json({ error: 'ログイン情報が不足しています。' }, 400);
   const challengeRow = await c.env.DB.prepare(
-    `SELECT challenge FROM auth_challenges WHERE id = ? AND kind = 'login' AND expires_at > CURRENT_TIMESTAMP`
+    `SELECT challenge FROM auth_challenges WHERE id = ? AND kind = 'login' AND julianday(expires_at) > julianday('now')`
   ).bind(payload.flowId).first<{ challenge: string }>();
   if (!challengeRow) return c.json({ error: 'ログインの有効時間が切れました。もう一度お試しください。' }, 400);
   const credential = await c.env.DB.prepare(
@@ -357,7 +361,7 @@ app.get('/api/auth/sessions', async (c) => {
   const sessions = await c.env.DB.prepare(
     `SELECT id, created_at, last_seen_at, expires_at, user_agent,
             CASE WHEN token_hash = ? THEN 1 ELSE 0 END AS is_current
-     FROM user_sessions WHERE user_id = ? AND expires_at > CURRENT_TIMESTAMP
+     FROM user_sessions WHERE user_id = ? AND julianday(expires_at) > julianday('now')
      ORDER BY last_seen_at DESC`
   ).bind(await sha256(currentToken!), session.userId).all();
   return c.json({ sessions: sessions.results });
@@ -418,8 +422,9 @@ app.put('/api/bookmarks/:articleId', async (c) => {
   const articleId = c.req.param('articleId');
   const exists = await c.env.DB.prepare("SELECT id FROM articles WHERE id = ? AND status = 'published'").bind(articleId).first();
   if (!exists) return c.json({ error: '記事が見つかりません。' }, 404);
-  await c.env.DB.batch([
-    c.env.DB.prepare('INSERT OR IGNORE INTO user_bookmarks (user_id, article_id) VALUES (?, ?)').bind(session.userId, articleId),
+  const inserted = await c.env.DB.prepare('INSERT OR IGNORE INTO user_bookmarks (user_id, article_id) VALUES (?, ?)')
+    .bind(session.userId, articleId).run();
+  if (inserted.meta.changes) await c.env.DB.batch([
     c.env.DB.prepare("INSERT INTO user_actions (id, user_id, article_id, action) VALUES (?, ?, ?, 'saved')").bind(crypto.randomUUID(), session.userId, articleId),
     c.env.DB.prepare("INSERT INTO analytics_events (id, event_name, user_id, article_id, section) VALUES (?, 'bookmark_save', ?, ?, 'saved')").bind(crypto.randomUUID(), session.userId, articleId)
   ]);
@@ -431,8 +436,9 @@ app.delete('/api/bookmarks/:articleId', async (c) => {
   const session = await readSession(c.env, getCookie(c, SESSION_COOKIE));
   if (!session) return c.json({ error: 'ログインが必要です。' }, 401);
   const articleId = c.req.param('articleId');
-  await c.env.DB.batch([
-    c.env.DB.prepare('DELETE FROM user_bookmarks WHERE user_id = ? AND article_id = ?').bind(session.userId, articleId),
+  const deleted = await c.env.DB.prepare('DELETE FROM user_bookmarks WHERE user_id = ? AND article_id = ?')
+    .bind(session.userId, articleId).run();
+  if (deleted.meta.changes) await c.env.DB.batch([
     c.env.DB.prepare("INSERT INTO user_actions (id, user_id, article_id, action) VALUES (?, ?, ?, 'unsaved')").bind(crypto.randomUUID(), session.userId, articleId),
     c.env.DB.prepare("INSERT INTO analytics_events (id, event_name, user_id, article_id, section) VALUES (?, 'bookmark_remove', ?, ?, 'saved')").bind(crypto.randomUUID(), session.userId, articleId)
   ]);
@@ -449,13 +455,19 @@ app.post('/api/articles/:articleId/open', async (c) => {
 
 app.post('/api/analytics/events', async (c) => {
   if (!sameOrigin(c.req.raw)) return c.json({ ok: false }, 403);
-  const payload = await c.req.json().catch(() => ({})) as {
+  let payload: {
     eventName?: string; visitorId?: string; sessionId?: string; articleId?: string; section?: string; deviceType?: string; referrerHost?: string;
   };
-  const allowedEvents = new Set(['page_view', 'section_view', 'article_open', 'source_click', 'bookmark_save', 'bookmark_remove']);
+  try {
+    const parsed: unknown = JSON.parse(await readLimitedText(c.req.raw, MAX_ANALYTICS_BODY_BYTES));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return c.json({ ok: false }, 400);
+    payload = parsed;
+  } catch (error) {
+    return c.json({ ok: false }, error instanceof BodyTooLargeError ? 413 : 400);
+  }
   const allowedSections = new Set(['about', 'action', 'japan', 'research', 'saved', 'admin']);
   const allowedDevices = new Set(['desktop', 'tablet', 'mobile']);
-  if (!payload.eventName || !allowedEvents.has(payload.eventName)) return c.json({ ok: false }, 400);
+  if (!isPublicAnalyticsEvent(payload.eventName)) return c.json({ ok: false }, 400);
   const section = allowedSections.has(payload.section ?? '') ? payload.section! : '';
   const deviceType = allowedDevices.has(payload.deviceType ?? '') ? payload.deviceType! : 'desktop';
   const visitorId = cleanText(payload.visitorId ?? '').slice(0, 80);
@@ -463,6 +475,8 @@ app.post('/api/analytics/events', async (c) => {
   const rawReferrer = cleanText(payload.referrerHost ?? '').toLowerCase().slice(0, 120);
   const referrerHost = /^(direct|self|[a-z0-9.-]+)$/.test(rawReferrer) ? rawReferrer : '';
   const articleId = cleanText(payload.articleId ?? '').slice(0, 80) || null;
+  const ip = c.req.header('cf-connecting-ip') ?? 'local';
+  if (!await consumeRequestLimit(c.env.DB, await sha256(`${ip}:analytics`), 120, 600)) return c.json({ ok: false }, 429);
   const session = await readSession(c.env, getCookie(c, SESSION_COOKIE));
   try {
     const metadata = JSON.stringify({
@@ -866,10 +880,10 @@ async function fetchSourceItems(source: SourceRecord, options: IngestOptions): P
       const result = await fetchWithPolicy(source, requestUrl, options.mode === 'backfill');
       if (result.notModified) return { items: [], meta: { ...result, mode: candidate.mode } };
       const discovered = candidate.mode === 'api'
-        ? await parseApiResponse(source, result.response)
+        ? parseApiResponse(source, result.body)
         : candidate.mode === 'rss'
-          ? await parseRssResponse(source, result.response, options.mode === 'backfill' || source.id === 'arxiv-fde-research' ? 1_500 : 60)
-          : await parseHtmlResponse(source, result.response);
+          ? parseRssResponse(source, result.body, options.mode === 'backfill' || source.id === 'arxiv-fde-research' ? 1_500 : 60)
+          : await parseHtmlResponse(source, result.body);
       let window = discovered;
       if (options.mode === 'backfill') {
         const sinceTime = Date.parse(options.since ?? '');
@@ -889,7 +903,7 @@ async function fetchSourceItems(source: SourceRecord, options: IngestOptions): P
   throw lastError ?? new Error(`${source.name}: no fetch surface configured`);
 }
 
-async function fetchWithPolicy(source: SourceRecord, url: string, unconditional = false): Promise<{ response: Response; etag: string | null; lastModified: string | null; notModified?: boolean }> {
+async function fetchWithPolicy(source: SourceRecord, url: string, unconditional = false): Promise<{ body: string; etag: string | null; lastModified: string | null; notModified?: boolean }> {
   const headers = new Headers({
     accept: 'application/atom+xml, application/rss+xml, application/xml, text/xml, application/json, text/html',
     'user-agent': FETCH_USER_AGENT
@@ -897,7 +911,7 @@ async function fetchWithPolicy(source: SourceRecord, url: string, unconditional 
   if (!unconditional && source.etag) headers.set('if-none-match', source.etag);
   if (!unconditional && source.lastModified) headers.set('if-modified-since', source.lastModified);
   const response = await fetch(url, { headers });
-  if (response.status === 304) return { response, etag: source.etag ?? null, lastModified: source.lastModified ?? null, notModified: true };
+  if (response.status === 304) return { body: '', etag: source.etag ?? null, lastModified: source.lastModified ?? null, notModified: true };
   if (response.status === 429) {
     const failure = new Error(`${source.name}: HTTP 429`) as FetchFailure;
     failure.status = 429;
@@ -914,9 +928,14 @@ async function fetchWithPolicy(source: SourceRecord, url: string, unconditional 
     failure.status = response.status;
     throw failure;
   }
-  const contentLength = Number(response.headers.get('content-length') ?? 0);
-  if (contentLength > MAX_BODY_BYTES) throw new Error(`${source.name}: response exceeds ${MAX_BODY_BYTES} bytes`);
-  return { response, etag: response.headers.get('etag'), lastModified: response.headers.get('last-modified') };
+  let body: string;
+  try {
+    body = await readLimitedText(response, MAX_BODY_BYTES);
+  } catch (error) {
+    if (error instanceof BodyTooLargeError) throw new Error(`${source.name}: response exceeds ${MAX_BODY_BYTES} bytes`);
+    throw error;
+  }
+  return { body, etag: response.headers.get('etag'), lastModified: response.headers.get('last-modified') };
 }
 
 function buildBackfillUrl(source: SourceRecord, rawUrl: string, options: IngestOptions): string {
@@ -937,8 +956,8 @@ function buildBackfillUrl(source: SourceRecord, rawUrl: string, options: IngestO
   return url.toString();
 }
 
-async function parseApiResponse(source: SourceRecord, response: Response): Promise<DiscoveredItem[]> {
-  const json = await response.json() as { jobs?: Array<Record<string, unknown>> } | Array<Record<string, unknown>>;
+function parseApiResponse(source: SourceRecord, body: string): DiscoveredItem[] {
+  const json = JSON.parse(body) as { jobs?: Array<Record<string, unknown>> } | Array<Record<string, unknown>>;
   const rawItems = Array.isArray(json) ? json : json.jobs ?? [];
   return rawItems.slice(0, 800).flatMap((item) => {
     if (source.id === 'qiita-fde') return parseQiitaItem(item);
@@ -992,8 +1011,7 @@ function parseQiitaItem(item: Record<string, unknown>): DiscoveredItem[] {
   }];
 }
 
-async function parseRssResponse(source: SourceRecord, response: Response, maxEntries = 60): Promise<DiscoveredItem[]> {
-  const body = (await response.text()).slice(0, MAX_BODY_BYTES);
+function parseRssResponse(source: SourceRecord, body: string, maxEntries = 60): DiscoveredItem[] {
   const parsed = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_' }).parse(body);
   const entries = parsed.feed?.entry ?? parsed.rss?.channel?.item ?? parsed.channel?.item ?? [];
   const list = Array.isArray(entries) ? entries : [entries];
@@ -1030,8 +1048,8 @@ async function parseRssResponse(source: SourceRecord, response: Response, maxEnt
   });
 }
 
-async function parseHtmlResponse(source: SourceRecord, response: Response): Promise<DiscoveredItem[]> {
-  if (source.parseMode === 'page') return parseSingleCareerPage(source, response);
+async function parseHtmlResponse(source: SourceRecord, body: string): Promise<DiscoveredItem[]> {
+  if (source.parseMode === 'page') return parseSingleCareerPage(source, body);
   const candidates: DiscoveredItem[] = [];
   let active: { url: string; title: string } | undefined;
   const rewriter = new HTMLRewriter().on('main a[href]', {
@@ -1063,11 +1081,11 @@ async function parseHtmlResponse(source: SourceRecord, response: Response): Prom
     },
     text(text) { if (active) active.title += text.text; }
   });
-  await rewriter.transform(response).arrayBuffer();
+  await rewriter.transform(new Response(body, { headers: { 'content-type': 'text/html; charset=utf-8' } })).arrayBuffer();
   return candidates.slice(0, 50);
 }
 
-async function parseSingleCareerPage(source: SourceRecord, response: Response): Promise<DiscoveredItem[]> {
+async function parseSingleCareerPage(source: SourceRecord, body: string): Promise<DiscoveredItem[]> {
   let title = '';
   let description = '';
   let publishedAt = '';
@@ -1077,7 +1095,7 @@ async function parseSingleCareerPage(source: SourceRecord, response: Response): 
     .on('meta[property="article:published_time"]', { element(element) { publishedAt ||= element.getAttribute('content') ?? ''; } })
     .on('meta[name="date"]', { element(element) { publishedAt ||= element.getAttribute('content') ?? ''; } })
     .on('time[datetime]', { element(element) { publishedAt ||= element.getAttribute('datetime') ?? ''; } });
-  await rewriter.transform(response).arrayBuffer();
+  await rewriter.transform(new Response(body, { headers: { 'content-type': 'text/html; charset=utf-8' } })).arrayBuffer();
   title = cleanText(title);
   description = cleanText(description);
   const haystack = `${title} ${description}`;
@@ -1707,8 +1725,9 @@ async function markSourceFailure(env: Env, source: SourceRecord, failure: FetchF
 }
 
 async function dispatchSources(env: Env): Promise<void> {
-  await env.DB.prepare('DELETE FROM auth_challenges WHERE expires_at <= CURRENT_TIMESTAMP').run().catch(() => undefined);
-  await env.DB.prepare('DELETE FROM user_sessions WHERE expires_at <= CURRENT_TIMESTAMP').run().catch(() => undefined);
+  await env.DB.prepare("DELETE FROM auth_challenges WHERE julianday(expires_at) <= julianday('now')").run().catch(() => undefined);
+  await env.DB.prepare("DELETE FROM user_sessions WHERE julianday(expires_at) <= julianday('now')").run().catch(() => undefined);
+  await env.DB.prepare("DELETE FROM request_rate_limits WHERE expires_at <= unixepoch('now')").run().catch(() => undefined);
   await syncSourceRegistry(env);
   const sources = await readSources(env);
   if (!sources.length) return;
@@ -1717,13 +1736,11 @@ async function dispatchSources(env: Env): Promise<void> {
 }
 
 function isAuthorized(request: Request, env: Env): boolean {
-  if (!env.INGEST_TOKEN) return true;
-  return request.headers.get('authorization') === `Bearer ${env.INGEST_TOKEN}`;
+  return hasConfiguredBearerToken(request.headers.get('authorization'), env.INGEST_TOKEN);
 }
 
 function isEmailTestAuthorized(request: Request, env: Env): boolean {
-  if (!env.EMAIL_TEST_TOKEN) return false;
-  return request.headers.get('authorization') === `Bearer ${env.EMAIL_TEST_TOKEN}`;
+  return hasConfiguredBearerToken(request.headers.get('authorization'), env.EMAIL_TEST_TOKEN);
 }
 
 type SessionIdentity = { sessionId: string; userId: string; displayName: string; isAdmin: boolean };
@@ -1737,10 +1754,7 @@ function sameOrigin(request: Request): boolean {
 async function allowAuthAttempt(env: Env, request: Request, action: string): Promise<boolean> {
   const ip = request.headers.get('cf-connecting-ip') ?? 'local';
   const key = `auth-rate:${await sha256(`${ip}:${action}`)}`;
-  const count = Number(await env.CACHE.get(key) ?? '0');
-  if (count >= 10) return false;
-  await env.CACHE.put(key, String(count + 1), { expirationTtl: 600 });
-  return true;
+  return consumeRequestLimit(env.DB, key, 10, 600);
 }
 
 function randomBase64(bytes: number): string {
@@ -1779,7 +1793,7 @@ async function readSession(env: Env, token?: string): Promise<SessionIdentity | 
   const session = await env.DB.prepare(
     `SELECT s.id AS session_id, u.id AS user_id, u.display_name, u.role
      FROM user_sessions s JOIN users u ON u.id = s.user_id
-     WHERE s.token_hash = ? AND s.expires_at > CURRENT_TIMESTAMP`
+     WHERE s.token_hash = ? AND julianday(s.expires_at) > julianday('now')`
   ).bind(await sha256(token)).first<{ session_id: string; user_id: string; display_name: string; role: string }>();
   if (!session) return null;
   await env.DB.prepare('UPDATE user_sessions SET last_seen_at = CURRENT_TIMESTAMP WHERE id = ?').bind(session.session_id).run();
