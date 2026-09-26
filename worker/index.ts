@@ -964,7 +964,7 @@ function parseApiResponse(source: SourceRecord, body: string): DiscoveredItem[] 
     const title = cleanText(String(item.title ?? item.name ?? ''));
     const location = cleanText(String((item.location as Record<string, unknown> | undefined)?.name ?? ''));
     const content = cleanText(String(item.content ?? item.description ?? ''));
-    const haystack = `${title} ${content}`;
+    const haystack = `${title} ${content} ${(source.includeTerms ?? []).join(' ')}`;
     if (!ROLE_PATTERN.test(title) || !AI_PATTERN.test(haystack)) return [];
     const score = scoreFde(haystack, true);
     const url = String(item.absolute_url ?? item.url ?? '');

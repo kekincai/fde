@@ -45,3 +45,10 @@ test('does not repeatedly poll the archived Microsoft customer story', () => {
   assert.equal(source.enabled, false);
   assert.equal(source.homepage, 'https://www.microsoft.com/en/customers/story/26648-sight-machine-microsoft-foundry');
 });
+
+test('uses the compact Anthropic jobs feed without losing AI role context', () => {
+  const source = sourceRegistry.find((item) => item.id === 'anthropic-careers');
+  assert.ok(source);
+  assert.match(source.apiUrl ?? '', /content=false/);
+  assert.ok(source.includeTerms?.includes('AI'));
+});
