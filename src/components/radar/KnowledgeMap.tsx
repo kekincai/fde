@@ -44,8 +44,7 @@ const coverageText = (chapter: CoverageChapter) => chapter.publishedCount > 0
 export default function KnowledgeMap({ coverage, selectedChapter, onSelect }: Props) {
   return <section className="knowledge-page" aria-labelledby="knowledge-title">
     <header className="knowledge-head">
-      <div className="knowledge-title"><Icon name="map" size={38} /><div><h1 id="knowledge-title">AI導入を、24の問いで。</h1><p>顧客課題から組織定着まで、知りたい問いを選ぶと関連する一次情報へ進めます。</p></div></div>
-      <strong><Icon name="book" size={23} />{coverage.length}<small>の実務の問い</small></strong>
+      <div className="knowledge-title"><div><h1 id="knowledge-title">24の問い</h1><p>AI導入で出てくる実務の問いを5つの段階に分けています。問いを選ぶと、関連する収集情報に絞り込みます。</p></div></div>
     </header>
     <div className="chapter-columns">{chapterPillars.map((chapterPillar, index) => <section key={chapterPillar}>
       <h2><span className="chapter-number">0{index + 1}</span><Icon name={pillarIcons[chapterPillar]} size={24} /><span>{pillarLabels[chapterPillar]}<small>{chapterPillar}</small></span></h2>

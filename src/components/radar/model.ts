@@ -30,7 +30,7 @@ export type ApiArticle = Partial<Record<keyof Article, unknown>> & {
 
 export type User = { id: string; displayName: string; isAdmin: boolean };
 export type Session = { id: string; created_at: string; last_seen_at: string; expires_at: string; user_agent: string; is_current: number };
-export type Overview = { counts?: { total?: number; japan?: number; p0?: number; p1?: number; p2?: number }; last_ingested_at?: string | null };
+export type Overview = { counts?: { total?: number; japan?: number; p0?: number; p1?: number; p2?: number }; sources?: Array<{ id: string }>; last_ingested_at?: string | null };
 export type CoverageChapter = { id: string; pillar: string; titleJa: string; questionJa: string; publishedCount: number; sourceCount: number; status: 'healthy' | 'thin' | 'empty' };
 export type Pagination = { page: number; pageSize: number; total: number; totalPages: number };
 
