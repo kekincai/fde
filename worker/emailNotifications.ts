@@ -9,7 +9,7 @@ export const INGEST_DISPATCH_CRON = '0 */6 * * *';
 export const INGEST_HEALTH_CRON = '*/30 * * * *';
 export const DAILY_DIGEST_CRON = '30 9 * * *';
 
-const SITE_URL = 'https://fde-radar.kekincai.workers.dev';
+const SITE_URL = 'https://fde.kejincai.dev';
 const RESEND_ENDPOINT = 'https://api.resend.com/emails';
 const RESEND_FROM = 'FDE Radar <onboarding@resend.dev>';
 const FAILURE_COOLDOWN_SECONDS = 6 * 60 * 60;

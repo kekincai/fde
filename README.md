@@ -2,7 +2,7 @@
 
 > AI を「試した」で終わらせず、顧客の現場で使える成果へつなげるための、日本語フィールドインテリジェンス。
 
-[公開サイト](https://fde-radar.kekincai.workers.dev) · [収集・判定の詳細](docs/ingestion-architecture.md) · [Issue](https://github.com/kekincai/fde/issues)
+[公開サイト](https://fde.kejincai.dev) · [収集・判定の詳細](docs/ingestion-architecture.md) · [Issue](https://github.com/kekincai/fde/issues)
 
 FDE Radar は一般的な AI ニュース集約サイトではありません。公式発表、導入事例、実装知見、制度、安全性、組織変革、採用情報を集め、`Customer → Build → Deploy → Govern → Organization` の実務ループと24の問いに整理します。
 
@@ -492,9 +492,9 @@ schema 変更がないリリースで D1 migration を実行しても、適用�
 デプロイ後の smoke test:
 
 ```bash
-curl -fsS https://fde-radar.kekincai.workers.dev/api/health
-curl -fsS https://fde-radar.kekincai.workers.dev/api/coverage
-curl -fsS https://fde-radar.kekincai.workers.dev/api/ingest/status
+curl -fsS https://fde.kejincai.dev/api/health
+curl -fsS https://fde.kejincai.dev/api/coverage
+curl -fsS https://fde.kejincai.dev/api/ingest/status
 ```
 
 ## 収集の運用
@@ -518,7 +518,7 @@ curl -X POST \
   -H "Authorization: Bearer $FDE_INGEST_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"sourceIds":["cloudflare-workers-ai-changelog"]}' \
-  https://fde-radar.kekincai.workers.dev/api/ingest/dispatch
+  https://fde.kejincai.dev/api/ingest/dispatch
 ```
 
 Source を省略すると、有効な Source をすべて Queue へ投入します。手動投入では対象 Source の `ETag` と `Last-Modified` を解除して再確認します。
@@ -530,7 +530,7 @@ curl -X POST \
   -H "Authorization: Bearer $FDE_INGEST_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"since":"2026-06-01","sourceIds":["qiita-fde"],"pages":[1,2]}' \
-  https://fde-radar.kekincai.workers.dev/api/ingest/backfill
+  https://fde.kejincai.dev/api/ingest/backfill
 ```
 
 backfill は Source とページごとに message を分割します。URL の一意制約と content hash により再実行できます。ただし取得範囲は、各 Source が RSS、API、公開ページで提供している期間までです。短い RSS window を「全履歴」とは扱いません。
