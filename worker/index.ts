@@ -24,10 +24,19 @@ import {
   sendConfigurationTest,
   sendDailyDigest
 } from './emailNotifications';
-import { FETCH_USER_AGENT, isDeferredYoutubeFeedFailure, isPermanentFetchFailure, sourceBackoffSeconds } from './fetchPolicy';
+import {
+  FETCH_USER_AGENT,
+  isDeferredYoutubeFeedFailure,
+  isPermanentFetchFailure,
+  isYoutubeFeedSource,
+  shouldRetryYoutubeFeedFailure,
+  sourceBackoffSeconds,
+  youtubeFeedRetryUrl
+} from './fetchPolicy';
 import { BodyTooLargeError, consumeRequestLimit, hasConfiguredBearerToken, isPublicAnalyticsEvent, readLimitedText } from './securityControls';
 import { chaptersFor, collectionStreamFor, sourceRegistry, type ContentType, type FdePillar, type SourceKind, type SourceRecord } from './sourceRegistry';
 import { evaluateCandidate, reviewWithWorkersAI, type SemanticDecision } from './intelligence';
+import { parseYoutubeChannelPage } from './youtubeFallback';
 
 export type IngestMessage = {
   sourceIds?: string[];
@@ -96,6 +105,7 @@ type DiscoveredItem = {
   contentType?: ContentType;
   summaryJa?: string;
   summaryZh?: string;
+  timeConfidence?: number;
 };
 
 type FetchMeta = {
@@ -866,10 +876,11 @@ async function syncSourceRegistry(env: Env): Promise<void> {
 
 async function fetchSourceItems(source: SourceRecord, options: IngestOptions): Promise<{ items: DiscoveredItem[]; meta: FetchMeta }> {
   const rssUrl = options.mode === 'backfill' && source.backfillUrl ? source.backfillUrl : source.feedUrl;
+  const youtubeVideosUrl = isYoutubeFeedSource(source) ? `${source.homepage.replace(/\/$/, '')}/videos` : undefined;
   const candidates = [
     { mode: 'api' as const, url: source.apiUrl },
     { mode: 'rss' as const, url: rssUrl },
-    { mode: 'html' as const, url: source.fetchMode === 'html' ? source.homepage : undefined }
+    { mode: 'html' as const, url: source.fetchMode === 'html' ? source.homepage : youtubeVideosUrl }
   ].filter((candidate): candidate is { mode: SourceRecord['fetchMode']; url: string } => Boolean(candidate.url));
   let lastError: FetchFailure | undefined;
   for (const candidate of candidates) {
@@ -883,7 +894,9 @@ async function fetchSourceItems(source: SourceRecord, options: IngestOptions): P
         ? parseApiResponse(source, result.body)
         : candidate.mode === 'rss'
           ? parseRssResponse(source, result.body, options.mode === 'backfill' || source.id === 'arxiv-fde-research' ? 1_500 : 60)
-          : await parseHtmlResponse(source, result.body);
+          : isYoutubeFeedSource(source)
+            ? parseYoutubeHtmlResponse(source, result.body)
+            : await parseHtmlResponse(source, result.body);
       let window = discovered;
       if (options.mode === 'backfill') {
         const sinceTime = Date.parse(options.since ?? '');
@@ -894,13 +907,37 @@ async function fetchSourceItems(source: SourceRecord, options: IngestOptions): P
           window = window.slice(offset, offset + pageSize);
         }
       }
-      const items = window.map((item) => enrichItem(source, item));
+      const items = window.map((item) => enrichItem(source, {
+        ...item,
+        timeConfidence: item.timeConfidence ?? (candidate.mode === 'api' || candidate.mode === 'rss' ? 0.9 : undefined)
+      }));
       return { items, meta: { ...result, mode: candidate.mode } };
     } catch (error) {
       lastError = error as FetchFailure;
     }
   }
   throw lastError ?? new Error(`${source.name}: no fetch surface configured`);
+}
+
+function parseYoutubeHtmlResponse(source: SourceRecord, body: string): DiscoveredItem[] {
+  return parseYoutubeChannelPage(body).flatMap((video) => {
+    const haystack = video.title;
+    if (!AI_PATTERN.test(haystack) && !ROLE_PATTERN.test(haystack)) return [];
+    return [{
+      externalItemId: video.videoId,
+      url: `https://www.youtube.com/watch?v=${video.videoId}`,
+      title: video.title,
+      summary: `${source.name}が公開したAI導入・運用に関する動画です。`,
+      publishedAt: video.publishedAt,
+      tags: compactTags(extractKeywords(haystack)),
+      signalType: inferSignalType(haystack),
+      location: inferLocation(haystack),
+      sector: inferSector(haystack),
+      countryRelevance: source.country === 'JP' ? 'JP' : inferRegion(haystack),
+      fdeScore: scoreFde(haystack, false),
+      timeConfidence: video.timeConfidence
+    }];
+  });
 }
 
 async function fetchWithPolicy(source: SourceRecord, url: string, unconditional = false): Promise<{ body: string; etag: string | null; lastModified: string | null; notModified?: boolean }> {
@@ -910,7 +947,12 @@ async function fetchWithPolicy(source: SourceRecord, url: string, unconditional 
   });
   if (!unconditional && source.etag) headers.set('if-none-match', source.etag);
   if (!unconditional && source.lastModified) headers.set('if-modified-since', source.lastModified);
-  const response = await fetch(url, { headers });
+  let response = await fetch(url, { headers });
+  if (shouldRetryYoutubeFeedFailure(source, { status: response.status })) {
+    const retryHeaders = new Headers(headers);
+    retryHeaders.set('cache-control', 'no-cache');
+    response = await fetch(youtubeFeedRetryUrl(url), { headers: retryHeaders });
+  }
   if (response.status === 304) return { body: '', etag: source.etag ?? null, lastModified: source.lastModified ?? null, notModified: true };
   if (response.status === 429) {
     const failure = new Error(`${source.name}: HTTP 429`) as FetchFailure;
@@ -1193,9 +1235,17 @@ async function ingestSource(env: Env, source: SourceRecord, options: IngestOptio
       const contentHash = await sha256(`${item.title}\n${item.summary}\n${item.tags.join(' ')}`);
       const candidateId = await sha256(`${source.id}\n${canonicalUrl}\n${contentHash}`);
       const priorCandidate = await env.DB.prepare(
-        `SELECT status FROM ingest_candidates WHERE source_id = ? AND canonical_url = ? AND content_hash = ?`
-      ).bind(source.id, canonicalUrl, contentHash).first<{ status: string }>();
+        `SELECT status, published_article_id FROM ingest_candidates
+         WHERE source_id = ? AND canonical_url = ? AND content_hash = ?`
+      ).bind(source.id, canonicalUrl, contentHash).first<{ status: string; published_article_id: string | null }>();
       if (priorCandidate?.status === 'published' || priorCandidate?.status === 'rejected') {
+        if (priorCandidate.status === 'published' && priorCandidate.published_article_id && item.timeConfidence !== undefined) {
+          await env.DB.prepare(
+            `UPDATE articles SET published_at = ?, published_at_original = ?, source_updated_at = ?,
+               crawl_run_at = ?, time_confidence = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+          ).bind(item.publishedAt, item.publishedAt, item.publishedAt, new Date().toISOString(),
+            item.timeConfidence, priorCandidate.published_article_id).run();
+        }
         duplicates += 1;
         await env.DB.prepare('UPDATE ingest_candidates SET last_seen_at = CURRENT_TIMESTAMP WHERE id = ?').bind(candidateId).run();
         continue;
@@ -1496,7 +1546,7 @@ function inferIntelligence(source: SourceRecord, item: DiscoveredItem): Intellig
       ? '公式情報の緊急性キーワードと公開時刻に基づく自動判定'
       : priorityLevel === 'P1' ? '本番導入・運用パターンとの一致に基づく自動判定' : '背景理解・中長期学習向けとして自動分類',
     relevanceScore, actionabilityScore, authorityScore, noveltyScore, clientFitScore, priorityScore,
-    timeConfidence: source.fetchMode === 'api' || source.fetchMode === 'rss' ? .9 : .55
+    timeConfidence: item.timeConfidence ?? (source.fetchMode === 'api' || source.fetchMode === 'rss' ? .9 : .55)
   };
 }
 
@@ -1920,7 +1970,8 @@ const worker = {
           const message = `${source.id}: ${errorMessage(error)}`;
           const attempts = (source.consecutiveFailures ?? 0) + 1;
           if (isPermanentFetchFailure(error as FetchFailure, attempts)) permanentFailures.push(message);
-          else if (isDeferredYoutubeFeedFailure(source, error as FetchFailure)) deferredFailures.push(message);
+          else if (isDeferredYoutubeFeedFailure(source, error as FetchFailure)
+            || (error as FetchFailure).status === 429) deferredFailures.push(message);
           else retryableFailures.push(message);
         }
       }
