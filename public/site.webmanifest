@@ -1,11 +1,11 @@
 {
   "name": "AI FDE RADAR",
   "short_name": "FDE RADAR",
-  "description": "AI Forward Deployed Engineeringの日本語リファレンス",
+  "description": "AI導入の一次情報を収集・分類する日本語サイト",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#f6f5f0",
-  "theme_color": "#246bfd",
+  "background_color": "#f5f4ef",
+  "theme_color": "#f5f4ef",
   "icons": [
     { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
     { "src": "/ai-fde-mark-512.png", "sizes": "512x512", "type": "image/png" }

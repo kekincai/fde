@@ -1,4 +1,5 @@
 import { priorityMeta, type Priority } from '../../data/articles';
+import { PriorityTag } from './Chrome';
 import Icon from './Icon';
 import { formatDate, type Overview } from './model';
 
@@ -19,48 +20,49 @@ const fieldLoop = [
 export default function AboutFde({ overview, onKnowledge, onSignals }: Props) {
   const counts = overview.counts ?? {};
   const stats: Array<[string, string]> = [
-    ['公開中', `${counts.total ?? '—'}件`],
-    ['うち日本', `${counts.japan ?? '—'}件`],
-    ['収集元', `${overview.sources?.length ?? '—'}`],
+    ['公開中の記事', (counts.total ?? 0).toLocaleString('ja-JP')],
+    ['うち日本', (counts.japan ?? 0).toLocaleString('ja-JP')],
+    ['収集元', String(overview.sources?.length ?? '—')],
     ['最終収集', formatDate(overview.last_ingested_at)]
   ];
-  return <main className="about-page" id="top">
-    <header className="about-head">
-      <h1>FDE RADAR について</h1>
-      <p>AIを実際の業務へ導入するときに役立つ一次情報（公式発表、導入事例、制度・ガイドライン、セキュリティ、求人）を6時間ごとに収集し、FDEの観点で分類して並べています。モデル性能だけの話題や一般的なAIニュースは除外しています。</p>
-      <dl className="about-stats">{stats.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
-      <div className="intro-actions"><button onClick={onSignals}>収集情報を見る<Icon name="arrowRight" size={16} /></button><button onClick={onKnowledge}>24の問いから探す<Icon name="map" size={16} /></button></div>
+  return <article className="page prose-page">
+    <header className="page-head">
+      <p className="eyebrow">About</p>
+      <h1>AIを業務に入れる人のための、一次情報の索引。</h1>
+      <p className="lede">公式発表、導入事例、制度・ガイドライン、セキュリティ、求人を6時間ごとに集め、FDEの観点で分類して並べています。モデル性能だけの話題や一般的なAIニュースは載せません。</p>
+      <dl className="stat-row">{stats.map(([label, value]) => <div key={label}><dt>{label}</dt><dd className="mono">{value}</dd></div>)}</dl>
+      <div className="button-row"><button className="button primary" onClick={onSignals}>収集情報を見る<Icon name="arrowRight" size={15} /></button><button className="button" onClick={onKnowledge}>24の問いから探す</button></div>
     </header>
 
-    <section className="about-block">
+    <section className="prose-section">
       <h2>FDE（Forward Deployed Engineer）とは</h2>
-      <p>顧客の現場に入り、課題の特定から実装、本番導入、利用定着までを一人称で担うエンジニアです。調整役ではなく、自分で技術判断とコードを書きます。仕事は次の5段階の繰り返しです。</p>
-      <ol className="loop-list">{fieldLoop.map(([title, copy]) => <li key={title}><b>{title}</b><span>{copy}</span></li>)}</ol>
+      <p>顧客の現場に入り、課題の特定から実装、本番導入、利用定着までを一人で通して担うエンジニアです。調整役ではなく、自分で技術判断をしてコードを書きます。仕事は次の5段階の繰り返しです。</p>
+      <ol className="steps">{fieldLoop.map(([title, copy], index) => <li key={title}><span className="mono">{String(index + 1).padStart(2, '0')}</span><b>{title}</b><p>{copy}</p></li>)}</ol>
     </section>
 
-    <section className="about-block">
+    <section className="prose-section">
       <h2>優先度の読み方</h2>
-      <table className="priority-table"><tbody>{(['P0', 'P1', 'P2'] as Priority[]).map((key) => <tr key={key} className={`priority-${key.toLowerCase()}`}>
-        <th><span className="priority-badge">{key}</span></th><td><b>{priorityMeta[key].label}</b></td><td>{priorityMeta[key].description}</td><td className="num">{counts[key.toLowerCase() as 'p0' | 'p1' | 'p2'] ?? '—'}件</td>
-      </tr>)}</tbody></table>
+      <ul className="priority-legend">{(['P0', 'P1', 'P2'] as Priority[]).map((key) => <li key={key}>
+        <PriorityTag priority={key} label /><p>{priorityMeta[key].description}</p><span className="mono">{(counts[key.toLowerCase() as 'p0' | 'p1' | 'p2'] ?? 0).toLocaleString('ja-JP')}件</span>
+      </li>)}</ul>
     </section>
 
-    <section className="about-block">
+    <section className="prose-section">
       <h2>収集と分類の仕組み</h2>
-      <ul className="plain-list">
-        <li>公式 RSS・API・公開ページのみを取得します。ログイン壁や利用条件は迂回しません。</li>
-        <li>キーワード規則で明確に対象外のものを除外し、境界的な候補だけを Workers AI（Llama 3.1 8B）で判定します。</li>
-        <li>各記事を5つの観点・24の問い・P0〜P2に分類します。</li>
+      <ul className="bullets">
+        <li>公式 RSS・API・公開ページだけを取得します。ログイン壁や利用条件は迂回しません。</li>
+        <li>キーワード規則で明らかに対象外のものを除き、判断が分かれる候補だけを Workers AI（Llama 3.1 8B）で判定します。</li>
+        <li>残った記事を5つの観点、24の問い、P0〜P2に分類します。</li>
       </ul>
-      <p className="about-note"><Icon name="alert" size={15} />要約・確認ポイント・分類は自動生成のため誤りを含むことがあります。判断の前に必ず一次情報を確認してください。</p>
+      <p className="callout"><Icon name="info" size={16} />要約・自動メモ・分類は機械的に作っているため、誤りを含むことがあります。判断の前に必ず一次情報を確認してください。</p>
     </section>
 
-    <section className="about-block">
+    <section className="prose-section">
       <h2>参考にした求人票</h2>
-      <ul className="link-list">
-        <li><a href="https://openai.com/careers/forward-deployed-engineer-tokyo-tokyo-japan/" target="_blank" rel="noreferrer">OpenAI — Forward Deployed Engineer, Tokyo<Icon name="external" size={13} /></a><span>発見から本番展開までを担当。成功指標は本番採用と業務への測定可能な影響。</span></li>
-        <li><a href="https://scale.com/careers/4593571005" target="_blank" rel="noreferrer">Scale AI — Forward Deployed Engineer, GenAI<Icon name="external" size={13} /></a><span>顧客固有のインフラを構築し、企業・政府の課題をエンジニアリングに落とす。</span></li>
+      <ul className="ref-list">
+        <li><a href="https://openai.com/careers/forward-deployed-engineer-tokyo-tokyo-japan/" target="_blank" rel="noreferrer">OpenAI — Forward Deployed Engineer, Tokyo<Icon name="external" size={13} /></a><p>発見から本番展開までを担当。成功指標は本番採用と業務への測定可能な影響。</p></li>
+        <li><a href="https://scale.com/careers/4593571005" target="_blank" rel="noreferrer">Scale AI — Forward Deployed Engineer, GenAI<Icon name="external" size={13} /></a><p>顧客固有のインフラを構築し、企業・政府の課題をエンジニアリングに落とす。</p></li>
       </ul>
     </section>
-  </main>;
+  </article>;
 }

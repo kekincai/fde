@@ -9,7 +9,6 @@ type Props = {
 };
 
 const chapterPillars = ['Customer', 'Build', 'Deploy', 'Govern', 'Organization'];
-const pillarIcons: Record<string, IconName> = { Customer: 'users', Build: 'code', Deploy: 'server', Govern: 'shield', Organization: 'building' };
 const chapterIcons: Record<string, IconName> = {
   'customer.problem': 'messageQuestion',
   'customer.use-case': 'bulb',
@@ -36,22 +35,30 @@ const chapterIcons: Record<string, IconName> = {
   'organization.talent': 'userSearch',
   'organization.ai-native': 'sparkles'
 };
-
-const coverageText = (chapter: CoverageChapter) => chapter.publishedCount > 0
-  ? `資料 ${chapter.publishedCount}件 · 収集元 ${chapter.sourceCount}`
-  : `関連資料を収集中 · 収集元 ${chapter.sourceCount}`;
+const statusLabels: Record<CoverageChapter['status'], string> = { healthy: '十分', thin: '少なめ', empty: '収集中' };
 
 export default function KnowledgeMap({ coverage, selectedChapter, onSelect }: Props) {
-  return <section className="knowledge-page" aria-labelledby="knowledge-title">
-    <header className="knowledge-head">
-      <div className="knowledge-title"><div><h1 id="knowledge-title">24の問い</h1><p>AI導入で出てくる実務の問いを5つの段階に分けています。問いを選ぶと、関連する収集情報に絞り込みます。</p></div></div>
+  const max = Math.max(1, ...coverage.map((item) => item.publishedCount));
+  return <article className="page map-page" aria-labelledby="knowledge-title">
+    <header className="page-head">
+      <p className="eyebrow">Knowledge map</p>
+      <h1 id="knowledge-title">24の問い</h1>
+      <p className="lede">AI導入の現場で出てくる問いを、顧客課題から組織定着までの5段階に分けています。問いを選ぶと、関連する記事だけに絞り込みます。</p>
     </header>
-    <div className="chapter-columns">{chapterPillars.map((chapterPillar, index) => <section key={chapterPillar}>
-      <h2><span className="chapter-number">0{index + 1}</span><Icon name={pillarIcons[chapterPillar]} size={24} /><span>{pillarLabels[chapterPillar]}<small>{chapterPillar}</small></span></h2>
-      <div className="chapter-items">
-      {coverage.filter((item) => item.pillar === chapterPillar).map((item) => <button key={item.id} className={selectedChapter === item.id ? 'active' : ''} onClick={() => onSelect(item)} aria-label={`${item.titleJa}。${item.questionJa}。${coverageText(item)}`}>
-        <span className="chapter-symbol"><Icon name={chapterIcons[item.id] ?? 'compass'} size={19} /></span><span className="chapter-copy"><b>{item.titleJa}</b><small>{item.questionJa}</small><em>{coverageText(item)}</em></span>
-      </button>)}</div>
-    </section>)}</div>
-  </section>;
+    {chapterPillars.map((pillar, index) => {
+      const chapters = coverage.filter((item) => item.pillar === pillar);
+      const total = chapters.reduce((sum, item) => sum + item.publishedCount, 0);
+      return <section key={pillar} className="map-stage">
+        <h2><span className="mono">{String(index + 1).padStart(2, '0')}</span>{pillarLabels[pillar]}<small>{pillar}</small><span className="mono stage-total">{total.toLocaleString('ja-JP')}件</span></h2>
+        <ul>{chapters.map((item) => <li key={item.id}><button className={selectedChapter === item.id ? 'active' : ''} onClick={() => onSelect(item)}>
+          <span className="map-icon"><Icon name={chapterIcons[item.id] ?? 'compass'} size={17} /></span>
+          <span className="map-copy"><b>{item.titleJa}</b><small>{item.questionJa}</small></span>
+          <span className={`map-count status-${item.status}`} title={`収集元 ${item.sourceCount} · ${statusLabels[item.status]}`}>
+            <span className="bar" aria-hidden="true"><i style={{ width: `${Math.max(item.publishedCount ? 4 : 0, item.publishedCount / max * 100)}%` }} /></span>
+            <span className="mono">{item.publishedCount}</span>
+          </span>
+        </button></li>)}</ul>
+      </section>;
+    })}
+  </article>;
 }

@@ -46,8 +46,52 @@ function parseList(value?: string, fallback = ''): string[] {
   return fallback ? [fallback] : [];
 }
 
+// D1 returns "YYYY-MM-DD HH:MM:SS" in UTC without a zone marker.
+export function parseDate(value?: string | null): Date | null {
+  if (!value) return null;
+  const normalized = /^\d{4}-\d{2}-\d{2} /.test(value) ? `${value.replace(' ', 'T')}Z` : value;
+  const date = new Date(normalized);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+const jstDay = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Tokyo' });
+const jstTime = new Intl.DateTimeFormat('ja-JP', { timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit' });
+const jstMonthDay = new Intl.DateTimeFormat('ja-JP', { timeZone: 'Asia/Tokyo', month: 'numeric', day: 'numeric' });
+const jstLongDay = new Intl.DateTimeFormat('ja-JP', { timeZone: 'Asia/Tokyo', month: 'long', day: 'numeric', weekday: 'short' });
+
+export function dayKey(value?: string | null): string {
+  const date = parseDate(value);
+  return date ? jstDay.format(date) : '';
+}
+
+export function dayLabel(key: string): string {
+  if (!key) return '日付不明';
+  const today = jstDay.format(new Date());
+  const yesterday = jstDay.format(new Date(Date.now() - 86_400_000));
+  const long = jstLongDay.format(new Date(`${key}T12:00:00+09:00`));
+  if (key === today) return `今日 · ${long}`;
+  if (key === yesterday) return `昨日 · ${long}`;
+  return long;
+}
+
+// Time of day for today's items, otherwise the date.
+export function shortTime(value?: string | null): string {
+  const date = parseDate(value);
+  if (!date) return '';
+  return jstDay.format(date) === jstDay.format(new Date()) ? jstTime.format(date) : jstMonthDay.format(date);
+}
+
+const stripText = (value: string) => value.replace(/[\s\p{P}\p{S}]/gu, '');
+
+// Generated notes often restate the title or summary; keep only text that adds something.
+export function usefulNote(note: string, article: Pick<Article, 'title' | 'summary'>): string {
+  const key = stripText(note).slice(0, 20);
+  if (key.length < 8) return '';
+  return stripText(article.summary).includes(key) || stripText(article.title).includes(key) ? '' : note;
+}
+
 export function relativeTime(value: string): string {
-  const diff = Math.max(0, Date.now() - Date.parse(value));
+  const diff = Math.max(0, Date.now() - (parseDate(value)?.getTime() ?? Date.now()));
   const hours = Math.floor(diff / 3_600_000);
   if (hours < 1) return `${Math.max(1, Math.floor(diff / 60_000))}分前`;
   if (hours < 24) return `${hours}時間前`;
@@ -88,14 +132,9 @@ export function fromApi(raw: ApiArticle): Article | null {
   };
 }
 
+const jstDateTime = new Intl.DateTimeFormat('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Tokyo' });
+
 export function formatDate(value?: string | null) {
-  if (!value) return '収集中';
-  const normalized = /^\d{4}-\d{2}-\d{2} /.test(value) ? `${value.replace(' ', 'T')}Z` : value;
-  return new Intl.DateTimeFormat('ja-JP', {
-    month: 'numeric',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    timeZone: 'Asia/Tokyo'
-  }).format(new Date(normalized));
+  const date = parseDate(value);
+  return date ? jstDateTime.format(date) : '収集中';
 }
