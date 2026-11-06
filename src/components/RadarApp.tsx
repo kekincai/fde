@@ -5,8 +5,8 @@ import { track, type AnalyticsSection } from '../lib/analytics';
 import AboutFde from './radar/AboutFde';
 import AuthDrawer from './radar/AuthDrawer';
 import FrontPage from './radar/FrontPage';
-import { fromApi, type ApiArticle, type CoverageChapter, type Overview, type User } from './radar/model';
-import { byScore } from './radar/typeset';
+import { fromApi, parseDate, type ApiArticle, type CoverageChapter, type Overview, type User } from './radar/model';
+import { byScore, issueFileName, issueOf } from './radar/typeset';
 import { installPrintFit } from './radar/print';
 import { PaperHeader, PaperProvider, SiteFooter, type PaperContextValue, type Section } from './radar/Paper';
 import QuestionsPage from './radar/QuestionsPage';
@@ -63,7 +63,10 @@ export default function RadarApp() {
 
   const story = onStory ? seen.current.get(state.article) ?? (lookup.id === state.article ? lookup.article : null) : null;
 
-  useEffect(() => installPrintFit(), []);
+  const folio = onStory ? '二面' : view === 'knowledge' ? '三面' : view === 'about' ? '社説' : view === 'admin' ? '管理' : '一面';
+  const printName = useRef('');
+  printName.current = issueFileName(issueOf(parseDate(overview.last_ingested_at)), folio);
+  useEffect(() => installPrintFit(() => printName.current), []);
 
   useEffect(() => {
     const leaveAdmin = () => update({ view: 'radar' });

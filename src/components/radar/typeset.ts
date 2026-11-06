@@ -118,6 +118,13 @@ export function issueOf(collectedAt?: Date | null, now = new Date()): Issue {
   };
 }
 
+/** FDEレーダー_2026-11-07_朝刊第91号_12版_一面 — the saved PDF's name. */
+export function issueFileName(issue: Issue, folio: string): string {
+  const p = jstParts(issue.date);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `FDEレーダー_${p.year}-${pad(p.month)}-${pad(p.day)}_${issue.kind}第${issue.number}号_${issue.han}版_${folio}`;
+}
+
 export function hostOf(url: string): string {
   try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return url; }
 }

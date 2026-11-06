@@ -10,8 +10,14 @@ const MM = 96 / 25.4;
 const PAGE_WIDTH = Math.floor((406 - 24) * MM);
 const PAGE_HEIGHT = Math.floor((545 - 24) * MM);
 
+let savedTitle: string | null = null;
+let fileName: () => string = () => '';
+
 function fitSheet() {
   const root = document.documentElement;
+  // Browsers name the saved PDF after the document title.
+  const name = fileName();
+  if (name) { savedTitle ??= document.title; document.title = name; }
   const sheet = document.querySelector<HTMLElement>('.sheet-of-paper');
   root.classList.add('is-printing');
   if (!sheet) return;
@@ -30,13 +36,18 @@ function fitSheet() {
 
 function clearSheet() {
   const root = document.documentElement;
+  if (savedTitle !== null) { document.title = savedTitle; savedTitle = null; }
   root.classList.remove('is-printing');
   root.style.removeProperty('--print-width');
   root.style.removeProperty('--print-zoom');
 }
 
-/** Fits the sheet for any print, including the browser's own print command. */
-export function installPrintFit(): () => void {
+/**
+ * Fits the sheet for any print, including the browser's own print command,
+ * and names the PDF with `getFileName` (read when printing starts).
+ */
+export function installPrintFit(getFileName: () => string): () => void {
+  fileName = getFileName;
   window.addEventListener('beforeprint', fitSheet);
   window.addEventListener('afterprint', clearSheet);
   return () => {
