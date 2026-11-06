@@ -28,19 +28,12 @@ function scrollToId(id: string, tries = 20) {
   else if (tries > 0) window.setTimeout(() => scrollToId(id, tries - 1), 100);
 }
 
-/** Direct links to 二面 (`?a=<id>`): there is no by-id endpoint, so look through the newest pages. */
+/** Direct links to 二面 (`?a=<id>`) that are not on the loaded page. */
 async function findArticle(id: string, signal: AbortSignal): Promise<Article | null> {
-  for (const channel of ['action', 'research', 'career']) {
-    for (let page = 1; page <= 4; page += 1) {
-      const response = await fetch(`/api/articles?channel=${channel}&sort=newest&pageSize=25&page=${page}`, { signal });
-      if (!response.ok) return null;
-      const data = await response.json() as { articles?: ApiArticle[]; pagination?: { totalPages?: number } };
-      const found = (data.articles ?? []).find((item) => item.id === id);
-      if (found) return fromApi(found);
-      if (page >= (data.pagination?.totalPages ?? 1)) break;
-    }
-  }
-  return null;
+  const response = await fetch(`/api/articles/${encodeURIComponent(id)}`, { signal });
+  if (!response.ok) return null;
+  const data = await response.json() as { article?: ApiArticle | null };
+  return data.article ? fromApi(data.article) : null;
 }
 
 export default function RadarApp() {
@@ -86,16 +79,18 @@ export default function RadarApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready]);
 
-  // A 二面 link opened directly: find the article once the list has loaded without it.
+  // A 二面 link opened directly: fetch that one article unless it is already known.
+  // Only the article id drives this effect, so recording the lookup does not cancel it.
   useEffect(() => {
-    if (!onStory || loading || seen.current.has(state.article) || lookup.id === state.article) return;
+    const id = state.article;
+    if (!onStory || seen.current.has(id)) return;
     const controller = new AbortController();
-    setLookup({ id: state.article, article: null, loading: true });
-    findArticle(state.article, controller.signal)
-      .then((article) => setLookup({ id: state.article, article, loading: false }))
-      .catch(() => { if (!controller.signal.aborted) setLookup({ id: state.article, article: null, loading: false }); });
+    setLookup({ id, article: null, loading: true });
+    findArticle(id, controller.signal)
+      .then((article) => setLookup({ id, article, loading: false }))
+      .catch(() => { if (!controller.signal.aborted) setLookup({ id, article: null, loading: false }); });
     return () => controller.abort();
-  }, [loading, lookup.id, onStory, state.article]);
+  }, [onStory, state.article]);
 
   // Drop a selection that is no longer on the current page.
   useEffect(() => {
@@ -232,7 +227,7 @@ export default function RadarApp() {
   </>;
   else if (view === 'knowledge') content = <QuestionsPage articles={articles} />;
   else if (view === 'about') content = <AboutFde />;
-  else if (onStory) content = <StoryPage article={story} loading={!story && (loading || lookup.loading || lookup.id !== state.article)} prev={prev} next={next} />;
+  else if (onStory) content = <StoryPage article={story} loading={!story && (lookup.loading || lookup.id !== state.article)} prev={prev} next={next} />;
   else content = <FrontPage ref={searchRef} articles={articles} pagination={pagination} loading={loading} error={error} selectedId={selectedId} onSelect={setSelectedId} />;
 
   return <PaperProvider value={paper}>

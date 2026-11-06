@@ -224,6 +224,23 @@ app.get('/api/articles', async (c) => {
   }
 });
 
+// One article for direct 二面 links (`/?a=<id>`). Same visibility rules as the list.
+app.get('/api/articles/:articleId', async (c) => {
+  const id = c.req.param('articleId');
+  if (!/^[A-Za-z0-9-]{1,64}$/.test(id)) return c.json({ article: null, error: 'invalid id' }, 400);
+  try {
+    const article = await c.env.DB.prepare(
+      `SELECT a.*, s.name AS source_name, s.source_kind
+       FROM articles a JOIN sources s ON s.id = a.source_id
+       WHERE a.id = ? AND a.status = 'published' AND a.fde_score >= 40`
+    ).bind(id).first();
+    if (!article) return c.json({ article: null }, 404, { 'Cache-Control': 'public, max-age=30' });
+    return c.json({ article }, 200, { 'Cache-Control': 'public, max-age=60, s-maxage=300' });
+  } catch (error) {
+    return c.json({ article: null, error: errorMessage(error) }, 503);
+  }
+});
+
 app.get('/api/overview', async (c) => {
   try {
     const [counts, sources, latest] = await Promise.all([
