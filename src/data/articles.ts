@@ -25,6 +25,10 @@ export type Article = {
   relevanceTags: string[];
   url: string;
   score: number;
+  whyItMatters: string;
+  chapterId: string;
+  semanticDecision: string;
+  semanticConfidence: number;
 };
 
 export const pillars = ['すべて', 'Customer', 'Build', 'Deploy', 'Govern', 'Organization'];

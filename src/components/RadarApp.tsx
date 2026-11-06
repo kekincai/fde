@@ -1,22 +1,46 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import type { Article, Channel } from '../data/articles';
 import { track, type AnalyticsSection } from '../lib/analytics';
 import AboutFde from './radar/AboutFde';
 import AuthDrawer from './radar/AuthDrawer';
-import { AccountButton, Brand, LiveStatus, PrimaryNav, Sheet } from './radar/Chrome';
-import FilterPanel from './radar/FilterPanel';
-import KnowledgeMap from './radar/KnowledgeMap';
-import type { CoverageChapter, Overview, User } from './radar/model';
-import SignalDetail from './radar/SignalDetail';
-import SignalList from './radar/SignalList';
+import FrontPage from './radar/FrontPage';
+import { fromApi, type ApiArticle, type CoverageChapter, type Overview, type User } from './radar/model';
+import { byScore } from './radar/typeset';
+import { PaperHeader, PaperProvider, SiteFooter, type PaperContextValue, type Section } from './radar/Paper';
+import QuestionsPage from './radar/QuestionsPage';
+import StoryPage from './radar/StoryPage';
 import { useArticles } from './radar/useArticles';
-import { defaultState, useRadarState, type RadarView } from './radar/useRadarState';
+import { defaultState, urlFor, useRadarState, type RadarState, type RadarView } from './radar/useRadarState';
 
 const AdminDashboard = lazy(() => import('./AdminDashboard'));
 
 function isTyping(target: EventTarget | null) {
   return target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName));
+}
+
+const scrollTop = () => window.scrollTo({ top: 0, behavior: 'smooth' });
+
+/** Scrolls to an anchor once it has rendered (sections load their data on their own). */
+function scrollToId(id: string, tries = 20) {
+  const element = document.getElementById(id);
+  if (element) element.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  else if (tries > 0) window.setTimeout(() => scrollToId(id, tries - 1), 100);
+}
+
+/** Direct links to 二面 (`?a=<id>`): there is no by-id endpoint, so look through the newest pages. */
+async function findArticle(id: string, signal: AbortSignal): Promise<Article | null> {
+  for (const channel of ['action', 'research', 'career']) {
+    for (let page = 1; page <= 4; page += 1) {
+      const response = await fetch(`/api/articles?channel=${channel}&sort=newest&pageSize=25&page=${page}`, { signal });
+      if (!response.ok) return null;
+      const data = await response.json() as { articles?: ApiArticle[]; pagination?: { totalPages?: number } };
+      const found = (data.articles ?? []).find((item) => item.id === id);
+      if (found) return fromApi(found);
+      if (page >= (data.pagination?.totalPages ?? 1)) break;
+    }
+  }
+  return null;
 }
 
 export default function RadarApp() {
@@ -27,17 +51,23 @@ export default function RadarApp() {
   const [savedIds, setSavedIds] = useState<string[]>([]);
   const [selectedId, setSelectedId] = useState('');
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [lookup, setLookup] = useState<{ id: string; article: Article | null; loading: boolean }>({ id: '', article: null, loading: false });
   const searchRef = useRef<HTMLInputElement>(null);
+  // Every article the reader has seen, so any headline can open 二面 without a refetch.
+  const seen = useRef(new Map<string, Article>());
 
   const { view, channel } = state;
+  const onStory = view === 'radar' && Boolean(state.article);
   const { articles, setArticles, pagination, loading, error } = useArticles(state, {
-    enabled: ready && view === 'radar',
+    enabled: ready && (view === 'radar' || view === 'knowledge'),
     userKey: user?.id ?? '',
     onUnauthorized: () => setDrawerOpen(true)
   });
+  articles.forEach((article) => seen.current.set(article.id, article));
   const selected = articles.find((article) => article.id === selectedId) ?? null;
   const section: AnalyticsSection = view === 'admin' ? 'admin' : view === 'about' ? 'about' : channel === 'saved' ? 'saved' : channel === 'research' || channel === 'career' ? 'research' : state.region === 'Japan' ? 'japan' : 'action';
+
+  const story = onStory ? seen.current.get(state.article) ?? (lookup.id === state.article ? lookup.article : null) : null;
 
   useEffect(() => {
     const leaveAdmin = () => update({ view: 'radar' });
@@ -56,39 +86,42 @@ export default function RadarApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready]);
 
+  // A 二面 link opened directly: find the article once the list has loaded without it.
+  useEffect(() => {
+    if (!onStory || loading || seen.current.has(state.article) || lookup.id === state.article) return;
+    const controller = new AbortController();
+    setLookup({ id: state.article, article: null, loading: true });
+    findArticle(state.article, controller.signal)
+      .then((article) => setLookup({ id: state.article, article, loading: false }))
+      .catch(() => { if (!controller.signal.aborted) setLookup({ id: state.article, article: null, loading: false }); });
+    return () => controller.abort();
+  }, [loading, lookup.id, onStory, state.article]);
+
   // Drop a selection that is no longer on the current page.
   useEffect(() => {
     if (selectedId && !loading && !articles.some((article) => article.id === selectedId)) setSelectedId('');
   }, [articles, loading, selectedId]);
 
-  const scrollTop = () => window.scrollTo({ top: 0, behavior: 'smooth' });
-
   const showView = useCallback((next: RadarView) => {
-    update({ view: next });
+    update({ view: next, article: '' });
     setDrawerOpen(false);
-    setFiltersOpen(false);
     track('section_view', next === 'knowledge' ? 'research' : next === 'radar' ? 'action' : next);
     scrollTop();
   }, [update]);
 
   const showChannel = useCallback((next: Channel) => {
-    update({ view: 'radar', channel: next, chapter: '' });
-    setFiltersOpen(false);
+    update({ view: 'radar', channel: next, chapter: '', article: '' });
     track('section_view', next === 'saved' ? 'saved' : next === 'research' || next === 'career' ? 'research' : 'action');
     scrollTop();
   }, [update]);
 
-  const goHome = () => {
-    update({ ...defaultState });
-    setSelectedId('');
-    setDrawerOpen(false);
-    scrollTop();
-  };
-
-  const selectArticle = useCallback((article: Article) => {
+  const openArticle = useCallback((article: Article) => {
+    seen.current.set(article.id, article);
     setSelectedId(article.id);
+    update({ view: 'radar', article: article.id });
     track('article_open', section, article.id);
-  }, [section]);
+    window.scrollTo({ top: 0 });
+  }, [section, update]);
 
   const openSource = useCallback((article: Article) => {
     void fetch(`/api/articles/${article.id}/open`, { method: 'POST' });
@@ -107,74 +140,105 @@ export default function RadarApp() {
     if (saved && channel === 'saved') setArticles((items) => items.filter((item) => item.id !== article.id));
   }, [channel, savedIds, setArticles, user]);
 
-  // Reader shortcuts: j/k move, o opens the source, s saves, / searches, Esc closes.
+  const leadArticle = selected ?? [...articles].sort(byScore)[0] ?? null;
+
+  const paper = useMemo<PaperContextValue>(() => {
+    const front: RadarState = { ...defaultState };
+    const stateFor = (to: Section): RadarState => {
+      if (to === 'questions') return { ...front, view: 'knowledge' };
+      if (to === 'about') return { ...front, view: 'about' };
+      if (to === 'admin') return { ...front, view: 'admin' };
+      if (to === 'saved') return { ...front, channel: 'saved' };
+      if (to === 'story' && leadArticle) return { ...state, view: 'radar', article: leadArticle.id };
+      return front;
+    };
+    return {
+      state, update, overview, coverage, user, savedIds,
+      href: (to) => `${urlFor(stateFor(to))}${to === 'japan' ? '#japan' : ''}`,
+      go: (to) => {
+        if (to === 'front') { update({ ...defaultState }); setSelectedId(''); scrollTop(); }
+        else if (to === 'japan') { if (state.view !== 'radar' || state.article || state.channel === 'saved') update({ ...defaultState }); scrollToId('japan'); }
+        else if (to === 'questions') showView('knowledge');
+        else if (to === 'about') showView('about');
+        else if (to === 'admin') showView('admin');
+        else if (to === 'saved') { if (user) showChannel('saved'); else setDrawerOpen(true); }
+        else if (to === 'story') { if (leadArticle) openArticle(leadArticle); else showChannel('action'); }
+      },
+      articleHref: (id) => urlFor({ ...state, view: 'radar', article: id }),
+      openArticle,
+      chapterHref: (id) => urlFor({ ...front, chapter: id, pillar: coverage.find((item) => item.id === id)?.pillar ?? 'すべて' }),
+      openChapter: (id) => {
+        const chapter = coverage.find((item) => item.id === id);
+        update({ ...defaultState, chapter: id, pillar: chapter?.pillar ?? 'すべて' });
+        track('section_view', 'action');
+        scrollTop();
+      },
+      openSource,
+      toggleSave: (article) => void toggleSave(article),
+      openAccount: () => setDrawerOpen(true)
+    };
+  }, [coverage, leadArticle, openArticle, openSource, overview, savedIds, showChannel, showView, state, toggleSave, update, user]);
+
+  const storyIndex = story ? articles.findIndex((article) => article.id === story.id) : -1;
+  const prev = storyIndex > 0 ? articles[storyIndex - 1] : null;
+  const next = storyIndex >= 0 && storyIndex < articles.length - 1 ? articles[storyIndex + 1] : null;
+
+  // Reader shortcuts (never shown in the UI): j/k move, o opens the source, s saves, / searches, Esc closes.
   useEffect(() => {
     if (view !== 'radar') return;
     const onKey = (event: KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       if (event.key === 'Escape') {
         if (isTyping(event.target)) (event.target as HTMLElement).blur();
+        else if (onStory) update({ article: '' });
         else setSelectedId('');
         return;
       }
       if (isTyping(event.target) || drawerOpen) return;
-      const index = articles.findIndex((article) => article.id === selectedId);
+      const current = onStory ? story : selected;
       if (event.key === '/') {
+        if (onStory) return;
         event.preventDefault();
         searchRef.current?.focus();
       } else if (event.key === 'j' || event.key === 'k') {
-        const next = articles[event.key === 'j' ? Math.min(articles.length - 1, index + 1) : Math.max(0, index - 1)];
-        if (!next) return;
-        selectArticle(next);
-        document.querySelector(`[data-article="${next.id}"]`)?.scrollIntoView({ block: 'nearest' });
-      } else if ((event.key === 'o' || event.key === 'Enter') && selected && !(event.target instanceof HTMLButtonElement)) {
-        openSource(selected);
-        window.open(selected.url, '_blank', 'noopener');
-      } else if (event.key === 's' && selected) {
-        void toggleSave(selected);
+        if (onStory) {
+          const target = event.key === 'j' ? next : prev;
+          if (target) openArticle(target);
+          return;
+        }
+        const index = articles.findIndex((article) => article.id === selectedId);
+        const target = articles[event.key === 'j' ? Math.min(articles.length - 1, index + 1) : Math.max(0, index - 1)];
+        if (!target) return;
+        setSelectedId(target.id);
+        const element = document.querySelector<HTMLElement>(`[data-article="${target.id}"]`);
+        element?.scrollIntoView({ block: 'nearest' });
+        element?.focus({ preventScroll: true });
+      } else if (event.key === 'o' && current) {
+        openSource(current);
+        window.open(current.url, '_blank', 'noopener');
+      } else if (event.key === 's' && current) {
+        void toggleSave(current);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [articles, drawerOpen, openSource, selectArticle, selected, selectedId, toggleSave, view]);
-
-  const nav = <PrimaryNav view={view} channel={channel} user={user} savedCount={savedIds.length} onChannel={showChannel} onView={showView} />;
-  const filters = <FilterPanel state={state} overview={overview} onChange={update} onKnowledge={() => showView('knowledge')} />;
+  }, [articles, drawerOpen, next, onStory, openArticle, openSource, prev, selected, selectedId, story, toggleSave, update, view]);
 
   let content;
-  if (view === 'admin') content = <Suspense fallback={<div className="notice">管理データを読み込んでいます…</div>}><AdminDashboard /></Suspense>;
-  else if (view === 'knowledge') content = <KnowledgeMap coverage={coverage} selectedChapter={state.chapter} onSelect={(item) => { update({ view: 'radar', channel: 'action', chapter: item.id, pillar: item.pillar, topic: 'すべて' }); scrollTop(); }} />;
-  else if (view === 'about') content = <AboutFde overview={overview} onKnowledge={() => showView('knowledge')} onSignals={() => showChannel('action')} />;
-  else content = <SignalList ref={searchRef} state={state} articles={articles} pagination={pagination} loading={loading} error={error} coverage={coverage} selectedId={selectedId} savedIds={savedIds} onChange={(patch) => { update(patch); if ('page' in patch) scrollTop(); }} onSelect={selectArticle} onSave={toggleSave} onOpenFilters={() => setFiltersOpen(true)} />;
+  if (view === 'admin') content = <>
+    <PaperHeader current="admin" folio="（管理）　運用" />
+    <Suspense fallback={<div className="notice">管理データを読み込んでいます…</div>}><AdminDashboard /></Suspense>
+    <SiteFooter />
+  </>;
+  else if (view === 'knowledge') content = <QuestionsPage articles={articles} />;
+  else if (view === 'about') content = <AboutFde />;
+  else if (onStory) content = <StoryPage article={story} loading={!story && (loading || lookup.loading || lookup.id !== state.article)} prev={prev} next={next} />;
+  else content = <FrontPage ref={searchRef} articles={articles} pagination={pagination} loading={loading} error={error} selectedId={selectedId} onSelect={setSelectedId} />;
 
-  return <div className={`app view-${view}`}>
-    <aside className="sidebar">
-      <Brand onHome={goHome} />
-      <LiveStatus lastIngestedAt={overview.last_ingested_at} />
-      {nav}
-      {view === 'radar' && filters}
-      <div className="sidebar-foot"><AccountButton user={user} onClick={() => setDrawerOpen(true)} /></div>
-    </aside>
-
-    <header className="topbar">
-      <Brand onHome={goHome} compact />
-      {nav}
-      <AccountButton user={user} onClick={() => setDrawerOpen(true)} />
-    </header>
-
-    <div className="workspace">
-      <main className="main" id="top">
-        {content}
-        <footer className="site-foot">
-          <span>FDE RADAR · 一次情報の収集と分類。要約と分類は自動生成です。</span>
-          <a href="https://github.com/kekincai/fde" target="_blank" rel="noreferrer">GitHub</a>
-        </footer>
-      </main>
-      {view === 'radar' && <SignalDetail article={selected} saved={selected ? savedIds.includes(selected.id) : false} onClose={() => setSelectedId('')} onSave={() => selected && void toggleSave(selected)} onOpenSource={() => selected && openSource(selected)} />}
+  return <PaperProvider value={paper}>
+    <div className={`paper view-${view}${onStory ? ' view-story' : ''}`}>
+      <main className="sheet-of-paper" id="top">{content}</main>
+      <AuthDrawer open={drawerOpen} user={user} bookmarkCount={savedIds.length} onClose={() => setDrawerOpen(false)} onAuthenticated={(nextUser, ids) => { setUser(nextUser); setSavedIds(ids); setDrawerOpen(false); }} onLogout={() => { setUser(null); setSavedIds([]); setDrawerOpen(false); update({ view: 'radar', channel: 'action', article: '' }); }} onAdmin={() => showView('admin')} />
     </div>
-    {view === 'radar' && <button className={`scrim detail-scrim ${selected ? 'is-visible' : ''}`} onClick={() => setSelectedId('')} aria-label="詳細を閉じる" tabIndex={selected ? 0 : -1} />}
-
-    <Sheet open={filtersOpen} title="絞り込み" onClose={() => setFiltersOpen(false)}>{filters}</Sheet>
-    <AuthDrawer open={drawerOpen} user={user} bookmarkCount={savedIds.length} onClose={() => setDrawerOpen(false)} onAuthenticated={(nextUser, ids) => { setUser(nextUser); setSavedIds(ids); setDrawerOpen(false); }} onLogout={() => { setUser(null); setSavedIds([]); setDrawerOpen(false); update({ view: 'radar', channel: 'action' }); }} onAdmin={() => showView('admin')} />
-  </div>;
+  </PaperProvider>;
 }

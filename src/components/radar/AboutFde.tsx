@@ -1,13 +1,6 @@
 import { priorityMeta, type Priority } from '../../data/articles';
-import { PriorityTag } from './Chrome';
-import Icon from './Icon';
-import { formatDate, type Overview } from './model';
-
-type Props = {
-  overview: Overview;
-  onKnowledge: () => void;
-  onSignals: () => void;
-};
+import { PaperHeader, SectionLink, SiteFooter, usePaper } from './Paper';
+import { kanjiNum, kanjiTime, zen } from './typeset';
 
 const fieldLoop = [
   ['顧客理解', '業務、制約、利用者、解くべき問題を現場で確認する。'],
@@ -17,52 +10,74 @@ const fieldLoop = [
   ['フィードバック', '効果を測り、学びを製品や再利用できる型に戻す。']
 ] as const;
 
-export default function AboutFde({ overview, onKnowledge, onSignals }: Props) {
+const ordinals = ['一', '二', '三', '四', '五'];
+
+const jobPosts = [
+  { href: 'https://openai.com/careers/forward-deployed-engineer-tokyo-tokyo-japan/', title: 'OpenAI — Forward Deployed Engineer, Tokyo', note: '発見から本番展開までを担当。成功指標は本番採用と業務への測定可能な影響。' },
+  { href: 'https://scale.com/careers/4593571005', title: 'Scale AI — Forward Deployed Engineer, GenAI', note: '顧客固有のインフラを構築し、企業・政府の課題をエンジニアリングに落とす。' }
+];
+
+/** ＦＤＥとは — the paper's 社説: what an FDE is and how this paper is made. */
+export default function AboutFde() {
+  const { overview } = usePaper();
   const counts = overview.counts ?? {};
-  const stats: Array<[string, string]> = [
-    ['公開中の記事', (counts.total ?? 0).toLocaleString('ja-JP')],
-    ['うち日本', (counts.japan ?? 0).toLocaleString('ja-JP')],
-    ['収集元', String(overview.sources?.length ?? '—')],
-    ['最終収集', formatDate(overview.last_ingested_at)]
-  ];
-  return <article className="page prose-page">
-    <header className="page-head">
-      <p className="eyebrow">About</p>
-      <h1>AIを業務に入れる人のための、一次情報の索引。</h1>
-      <p className="lede">公式発表、導入事例、制度・ガイドライン、セキュリティ、求人を6時間ごとに集め、FDEの観点で分類して並べています。モデル性能だけの話題や一般的なAIニュースは載せません。</p>
-      <dl className="stat-row">{stats.map(([label, value]) => <div key={label}><dt>{label}</dt><dd className="mono">{value}</dd></div>)}</dl>
-      <div className="button-row"><button className="button primary" onClick={onSignals}>収集情報を見る<Icon name="arrowRight" size={15} /></button><button className="button" onClick={onKnowledge}>24の問いから探す</button></div>
-    </header>
+  const sources = overview.sources?.length ?? 0;
 
-    <section className="prose-section">
-      <h2>FDE（Forward Deployed Engineer）とは</h2>
-      <p>顧客の現場に入り、課題の特定から実装、本番導入、利用定着までを一人で通して担うエンジニアです。調整役ではなく、自分で技術判断をしてコードを書きます。仕事は次の5段階の繰り返しです。</p>
-      <ol className="steps">{fieldLoop.map(([title, copy], index) => <li key={title}><span className="mono">{String(index + 1).padStart(2, '0')}</span><b>{title}</b><p>{copy}</p></li>)}</ol>
+  return <article className="ab" aria-labelledby="ab-title">
+    <PaperHeader current="about" folio="（社説）　ＦＤＥとは" />
+
+    <section className="ab-lead">
+      <p className="ab-kind tate kuro">社説</p>
+      <h1 id="ab-title" className="ab-h1 tate hl">ＡＩを業務に入れる<br />人のための一次情報の索引</h1>
+      <div className="ab-body tate-body">
+        <p>本紙は、ＡＩ導入に関わる公式発表、導入事例、制度・ガイドライン、セキュリティ、求人を六時間ごとに集め、ＦＤＥの観点で分類して並べている。モデル性能だけの話題や、一般的なＡＩニュースは載せない。</p>
+        <p>ＦＤＥ（Forward Deployed Engineer）とは、顧客の現場に入り、課題の特定から実装、本番導入、利用定着までを一人で通して担うエンジニアである。調整役ではなく、自ら技術判断をしてコードを書く。</p>
+        <p>【本紙の立場】ＡＩを「試した」で終わらせないために必要なのは、速報よりも一次情報の確かさだ。要約と分類は機械で作るため誤りを含みうる。判断の前には、必ず一次情報に当たってほしい。</p>
+      </div>
+      <dl className="ab-stats" aria-label="収録状況">
+        <div className="tate"><dt>公開中の記事</dt><dd>{kanjiNum(counts.total)}件</dd></div>
+        <div className="tate"><dt>うち日本</dt><dd>{kanjiNum(counts.japan)}件</dd></div>
+        <div className="tate"><dt>収集元</dt><dd>{sources ? `${kanjiNum(sources)}か所` : '―'}</dd></div>
+        <div className="tate"><dt>最終収集</dt><dd>{kanjiTime(overview.last_ingested_at)}</dd></div>
+      </dl>
     </section>
 
-    <section className="prose-section">
-      <h2>優先度の読み方</h2>
-      <ul className="priority-legend">{(['P0', 'P1', 'P2'] as Priority[]).map((key) => <li key={key}>
-        <PriorityTag priority={key} label /><p>{priorityMeta[key].description}</p><span className="mono">{(counts[key.toLowerCase() as 'p0' | 'p1' | 'p2'] ?? 0).toLocaleString('ja-JP')}件</span>
-      </li>)}</ul>
-    </section>
+    <div className="ab-columns">
+      <section className="ab-col" aria-labelledby="ab-loop">
+        <h2 id="ab-loop" className="ab-h2">五つの工程</h2>
+        <p className="ab-text">ＦＤＥの仕事は、次の五段階の繰り返しである。学びは次の課題へ戻る。</p>
+        <ol className="ab-steps">{fieldLoop.map(([title, copy], index) => <li key={title}>
+          <b>{ordinals[index]}、{title}</b><span>{copy}</span>
+        </li>)}</ol>
+        <SectionLink to="questions" className="text-link"><span>二十四の問いで見る（三面）</span></SectionLink>
+      </section>
 
-    <section className="prose-section">
-      <h2>収集と分類の仕組み</h2>
-      <ul className="bullets">
-        <li>公式 RSS・API・公開ページだけを取得します。ログイン壁や利用条件は迂回しません。</li>
-        <li>キーワード規則で明らかに対象外のものを除き、判断が分かれる候補だけを Workers AI（Llama 3.1 8B）で判定します。</li>
-        <li>残った記事を5つの観点、24の問い、P0〜P2に分類します。</li>
-      </ul>
-      <p className="callout"><Icon name="info" size={16} />要約・自動メモ・分類は機械的に作っているため、誤りを含むことがあります。判断の前に必ず一次情報を確認してください。</p>
-    </section>
+      <section className="ab-col" aria-labelledby="ab-priority">
+        <h2 id="ab-priority" className="ab-h2">優先度の読み方</h2>
+        <ul className="ab-priority">{(['P0', 'P1', 'P2'] as Priority[]).map((key) => <li key={key} className={`ab-p-${key.toLowerCase()}`}>
+          <p className="ab-p-name"><b>{zen(key)}　{priorityMeta[key].label}</b><span>{(counts[key.toLowerCase() as 'p0' | 'p1' | 'p2'] ?? 0).toLocaleString('ja-JP')}件</span></p>
+          <p className="ab-text">{priorityMeta[key].description}</p>
+        </li>)}</ul>
+      </section>
 
-    <section className="prose-section">
-      <h2>参考にした求人票</h2>
-      <ul className="ref-list">
-        <li><a href="https://openai.com/careers/forward-deployed-engineer-tokyo-tokyo-japan/" target="_blank" rel="noreferrer">OpenAI — Forward Deployed Engineer, Tokyo<Icon name="external" size={13} /></a><p>発見から本番展開までを担当。成功指標は本番採用と業務への測定可能な影響。</p></li>
-        <li><a href="https://scale.com/careers/4593571005" target="_blank" rel="noreferrer">Scale AI — Forward Deployed Engineer, GenAI<Icon name="external" size={13} /></a><p>顧客固有のインフラを構築し、企業・政府の課題をエンジニアリングに落とす。</p></li>
-      </ul>
-    </section>
+      <section className="ab-col" aria-labelledby="ab-method">
+        <h2 id="ab-method" className="ab-h2">収集と分類の仕組み</h2>
+        <ul className="ab-bullets dotted">
+          <li>公式 RSS・API・公開ページだけを取得する。ログイン壁や利用条件は迂回しない。</li>
+          <li>キーワード規則で明らかに対象外のものを除き、判断が分かれる候補だけを Workers AI（Llama 3.1 8B）で判定する。</li>
+          <li>残った記事を五つの観点、二十四の問い、Ｐ０〜Ｐ２に分類する。</li>
+        </ul>
+        <p className="ab-callout kakomi">要約・確認ポイント・分類は機械的に作っているため、誤りを含むことがある。判断の前に必ず一次情報を確認すること。</p>
+      </section>
+
+      <section className="ab-col" aria-labelledby="ab-jobs">
+        <h2 id="ab-jobs" className="ab-h2">参考にした求人票</h2>
+        <ul className="ab-jobs dotted">{jobPosts.map((post) => <li key={post.href}>
+          <a href={post.href} target="_blank" rel="noreferrer">{post.title}</a>
+          <p className="ab-text">{post.note}</p>
+        </li>)}</ul>
+      </section>
+    </div>
+    <SiteFooter />
   </article>;
 }

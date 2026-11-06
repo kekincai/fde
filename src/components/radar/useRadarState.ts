@@ -15,10 +15,12 @@ export type RadarState = {
   sort: SortOrder;
   query: string;
   page: number;
+  /** Article shown on 二面 (`?a=<id>`); empty on every other page. */
+  article: string;
 };
 
 export const defaultState: RadarState = {
-  view: 'radar', channel: 'action', region: 'ALL', pillar: 'すべて', topic: 'すべて', chapter: '', priority: 'ALL', sort: 'newest', query: '', page: 1
+  view: 'radar', channel: 'action', region: 'ALL', pillar: 'すべて', topic: 'すべて', chapter: '', priority: 'ALL', sort: 'newest', query: '', page: 1, article: ''
 };
 
 const viewParams: Record<RadarView, string> = { radar: '', about: 'about', knowledge: 'map', admin: 'admin' };
@@ -43,11 +45,13 @@ function readUrl(): RadarState {
     priority: priority === 'P0' || priority === 'P1' || priority === 'P2' ? priority : 'ALL',
     sort: sort === 'priority' || sort === 'published' ? sort : 'newest',
     query: params.get('q') ?? '',
-    page: Math.max(1, Number(params.get('page')) || 1)
+    page: Math.max(1, Number(params.get('page')) || 1),
+    article: view === 'radar' ? params.get('a') ?? '' : ''
   };
 }
 
-function writeUrl(state: RadarState): string {
+/** The URL a state maps to, for real `<a href>` links. */
+export function urlFor(state: RadarState): string {
   const params = new URLSearchParams();
   if (viewParams[state.view]) params.set('v', viewParams[state.view]);
   if (state.view === 'radar') {
@@ -60,9 +64,10 @@ function writeUrl(state: RadarState): string {
     if (state.sort !== 'newest') params.set('sort', state.sort);
     if (state.query.trim()) params.set('q', state.query.trim());
     if (state.page > 1) params.set('page', String(state.page));
+    if (state.article) params.set('a', state.article);
   }
   const search = params.toString();
-  return search ? `?${search}` : window.location.pathname;
+  return search ? `?${search}` : (typeof window === 'undefined' ? '/' : window.location.pathname);
 }
 
 /**
@@ -72,12 +77,12 @@ function writeUrl(state: RadarState): string {
 export function useRadarState() {
   const [state, setState] = useState<RadarState>(defaultState);
   const [ready, setReady] = useState(false);
-  const lastView = useRef<RadarView>(defaultState.view);
+  const lastView = useRef(`${defaultState.view}:`);
 
   useEffect(() => {
     const restore = () => {
       const next = readUrl();
-      lastView.current = next.view;
+      lastView.current = `${next.view}:${next.article}`;
       setState(next);
     };
     restore();
@@ -88,9 +93,10 @@ export function useRadarState() {
 
   useEffect(() => {
     if (!ready) return;
-    const next = writeUrl(state);
-    const viewChanged = state.view !== lastView.current;
-    lastView.current = state.view;
+    const next = urlFor(state);
+    const page = `${state.view}:${state.article}`;
+    const viewChanged = page !== lastView.current;
+    lastView.current = page;
     if (next === (window.location.search || window.location.pathname)) return;
     if (viewChanged) window.history.pushState(null, '', next);
     else window.history.replaceState(null, '', next);

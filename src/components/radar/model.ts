@@ -26,12 +26,16 @@ export type ApiArticle = Partial<Record<keyof Article, unknown>> & {
   relevance_tags?: string;
   canonical_url?: string;
   fde_score?: number;
+  why_it_matters?: string;
+  chapter_id?: string;
+  semantic_decision?: string;
+  semantic_confidence?: number;
 };
 
 export type User = { id: string; displayName: string; isAdmin: boolean };
 export type Session = { id: string; created_at: string; last_seen_at: string; expires_at: string; user_agent: string; is_current: number };
-export type Overview = { counts?: { total?: number; japan?: number; p0?: number; p1?: number; p2?: number }; sources?: Array<{ id: string }>; last_ingested_at?: string | null };
-export type CoverageChapter = { id: string; pillar: string; titleJa: string; questionJa: string; publishedCount: number; sourceCount: number; status: 'healthy' | 'thin' | 'empty' };
+export type Overview = { counts?: { total?: number; japan?: number; p0?: number; p1?: number; p2?: number }; sources?: Array<{ id: string; name?: string }>; last_ingested_at?: string | null };
+export type CoverageChapter = { id: string; pillar: string; titleJa: string; questionJa: string; publishedCount: number; sourceCount: number; status: 'healthy' | 'thin' | 'empty'; japanCount?: number };
 export type Pagination = { page: number; pageSize: number; total: number; totalPages: number };
 
 function parseList(value?: string, fallback = ''): string[] {
@@ -103,6 +107,11 @@ export function articleTime(article: Article, sort: SortOrder): string {
   return `公開 ${relativeTime(article.publishedAt || article.collectedAt)}`;
 }
 
+// Some feeds hand over Markdown; the paper prints plain text.
+function plain(value: string): string {
+  return value.replace(/^\s{0,3}#{1,6}\s+/gm, '').replace(/\*\*|__|`/g, '').replace(/\[([^\]]+)\]\([^)]*\)/g, '$1').replace(/\s*#{2,}\s*/g, ' ').trim();
+}
+
 export function fromApi(raw: ApiArticle): Article | null {
   if (!raw.id || !raw.title || !raw.canonical_url) return null;
   const region: Region = raw.region === 'Japan' || raw.country_relevance === 'JP' ? 'Japan' : 'Global';
@@ -125,10 +134,14 @@ export function fromApi(raw: ApiArticle): Article | null {
     sector: raw.sector || '業界横断',
     publishedAt,
     collectedAt: raw.first_seen_at || raw.discovered_at || publishedAt,
-    summary: raw.summary_ja || raw.summary || '公式情報源から取得した更新です。',
+    summary: plain(raw.summary_ja || raw.summary || '') || '公式情報源から取得した更新です。',
     relevanceTags: parseList(raw.relevance_tags),
     url: raw.canonical_url,
-    score: Number(raw.fde_score ?? 0)
+    score: Number(raw.fde_score ?? 0),
+    whyItMatters: plain(raw.why_it_matters || ''),
+    chapterId: raw.chapter_id || '',
+    semanticDecision: raw.semantic_decision || '',
+    semanticConfidence: Number(raw.semantic_confidence ?? 0)
   };
 }
 

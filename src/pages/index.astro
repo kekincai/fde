@@ -12,17 +12,20 @@ import '../styles/app.css';
     <meta property="og:title" content="FDE RADAR — AI導入の一次情報を集約" />
     <meta property="og:description" content="日本とグローバルのAI導入に関する一次情報を、6時間ごとに収集・分類。" />
     <meta property="og:image" content="/ai-fde-mark-512.png" />
-    <meta name="theme-color" content="#f5f4ef" media="(prefers-color-scheme: light)" />
-    <meta name="theme-color" content="#111214" media="(prefers-color-scheme: dark)" />
-    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#FFFFFF" />
+    <meta name="color-scheme" content="light" />
+    <script is:inline>
+      // Vertical multi-column text only where it renders reliably (current Chrome, Safari 17.4+, Firefox).
+      if (window.CSS && CSS.supports('writing-mode', 'vertical-rl') && CSS.supports('column-fill', 'auto') && CSS.supports('text-wrap', 'balance')) document.documentElement.classList.add('tate-ok');
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+JP:wght@400;500;600;700&display=swap" />
-    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=Noto+Serif+JP:wght@500;700;900&family=Yuji+Syuku&display=swap" />
+    <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32" />
     <link rel="icon" href="/icon-192.png" type="image/png" sizes="192x192" />
     <link rel="apple-touch-icon" href="/icon-192.png" />
     <link rel="manifest" href="/site.webmanifest" />
-    <title>FDE RADAR — AI導入の一次情報を集約</title>
+    <title>ＦＤＥレーダー — AI導入の一次情報を集約</title>
   </head>
   <body>
     <RadarApp client:load />

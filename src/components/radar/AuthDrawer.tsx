@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
 import { startAuthentication, startRegistration } from '@simplewebauthn/browser';
 
-import Icon from './Icon';
 import { formatDate, type Session, type User } from './model';
 
 type Props = {
@@ -28,6 +27,13 @@ export default function AuthDrawer({ open, user, bookmarkCount, onClose, onAuthe
       setShowSessions(false);
     }
   }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose, open]);
 
   async function submit(event: { preventDefault(): void }) {
     event.preventDefault();
@@ -78,24 +84,42 @@ export default function AuthDrawer({ open, user, bookmarkCount, onClose, onAuthe
   }
 
   return <>
-    <button className={`drawer-scrim ${open ? 'is-visible' : ''}`} onClick={onClose} aria-label="閉じる" tabIndex={open ? 0 : -1} />
-    <aside className={`account-drawer ${open ? 'is-open' : ''}`} aria-hidden={!open} inert={!open ? true : undefined}>
-      <div className="drawer-head">
-        <div className="drawer-title"><Icon name={user ? 'user' : 'key'} size={28} /><div><span>ACCOUNT</span><h2>{user ? 'アカウント' : 'FDE Radar に参加'}</h2></div></div>
-        <button onClick={onClose} aria-label="閉じる"><Icon name="close" /></button>
-      </div>
-      {user ? <div className="account-body">
-        <div className="profile-card"><div className="avatar">{user.displayName.slice(0, 1).toUpperCase()}</div><div><b>{user.displayName}</b><span>パスキーで保護されています</span></div></div>
-        <div className="account-stat"><span><Icon name="bookmark" size={18} />保存した記事</span><strong>{String(bookmarkCount).padStart(2, '0')}</strong></div>
-        {user.isAdmin && <button className="drawer-action admin-drawer-link" onClick={onAdmin}><Icon name="chart" />管理画面を開く<Icon name="chevron" /></button>}
-        <button className="drawer-action" onClick={loadSessions}><Icon name="devices" />ログイン中の端末・セッションを管理<Icon name="chevron" /></button>
-        {showSessions && <div className="session-list"><h3>ログイン中のセッション</h3>{sessions.map((session) => <div key={session.id}><div><b>{session.is_current ? 'この端末' : '別の端末'}</b><span>{session.user_agent || 'ブラウザ'} · {formatDate(session.last_seen_at)}</span></div><button onClick={() => revoke(session.id)}>終了</button></div>)}</div>}
-        <button className="logout-button" onClick={async () => { await fetch('/api/auth/logout', { method: 'POST' }); onLogout(); }}><Icon name="logout" />ログアウト</button>
-      </div> : <div className="auth-body">
-        <div className="auth-intro"><Icon name="shield" size={26} /><p>メールアドレスもパスワードも不要です。端末の Face ID、Touch ID、Windows Hello などで安全に保存リストを利用できます。</p></div>
-        <div className="auth-tabs"><button className={mode === 'login' ? 'active' : ''} onClick={() => setMode('login')}><Icon name="key" size={17} />ログイン</button><button className={mode === 'register' ? 'active' : ''} onClick={() => setMode('register')}><Icon name="userPlus" size={17} />新規登録</button></div>
-        <form onSubmit={submit}>{mode === 'register' && <label><span><Icon name="user" size={15} />表示名</span><input required maxLength={40} value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="表示名" /></label>}{message && <div className="form-error">{message}</div>}<button className="auth-submit" disabled={busy}><Icon name="key" size={18} />{busy ? '端末で確認中…' : mode === 'login' ? 'パスキーでログイン' : 'パスキーを作成'}</button></form>
-        <small><Icon name="lock" size={16} />生体情報は端末の外へ送信されません。FDE Radar は公開鍵だけを保存します。同期型パスキーなら別の端末でも利用できます。</small>
+    <button type="button" className={`au-scrim ${open ? 'is-visible' : ''}`} onClick={onClose} aria-label="閉じる" tabIndex={open ? 0 : -1} />
+    <aside className={`au-drawer ${open ? 'is-open' : ''}`} role="dialog" aria-modal="true" aria-labelledby="au-title" aria-hidden={!open} inert={!open ? true : undefined}>
+      <header className="au-head">
+        <h2 id="au-title">{user ? 'アカウント' : 'ＦＤＥレーダーに参加'}</h2>
+        <button type="button" className="au-close" onClick={onClose}>閉じる</button>
+      </header>
+      {user ? <div className="au-body">
+        <dl className="au-facts">
+          <div><dt>表示名</dt><dd>{user.displayName}</dd></div>
+          <div><dt>保護</dt><dd>パスキー</dd></div>
+          <div><dt>保存した記事</dt><dd>{bookmarkCount.toLocaleString('ja-JP')}件</dd></div>
+        </dl>
+        <div className="au-actions">
+          {user.isAdmin && <button type="button" className="btn btn-wide" onClick={onAdmin}>管理画面を開く</button>}
+          <button type="button" className="btn btn-wide" onClick={loadSessions} aria-expanded={showSessions}>ログイン中の端末・セッションを管理</button>
+        </div>
+        {showSessions && <section className="au-sessions" aria-labelledby="au-sessions-title">
+          <h3 id="au-sessions-title" className="kuro-head">ログイン中のセッション</h3>
+          <ul>{sessions.map((session) => <li key={session.id}>
+            <div><b>{session.is_current ? 'この端末' : '別の端末'}</b><span>{session.user_agent || 'ブラウザ'} · {formatDate(session.last_seen_at)}</span></div>
+            <button type="button" className="btn" onClick={() => revoke(session.id)}>終了</button>
+          </li>)}</ul>
+        </section>}
+        <button type="button" className="btn btn-kuro btn-wide au-logout" onClick={async () => { await fetch('/api/auth/logout', { method: 'POST' }); onLogout(); }}>ログアウト</button>
+      </div> : <div className="au-body">
+        <p className="au-intro">メールアドレスもパスワードも不要です。端末の Face ID、Touch ID、Windows Hello などで、保存リストを安全に利用できます。</p>
+        <div className="au-tabs" role="group" aria-label="ログインまたは新規登録">
+          <button type="button" aria-pressed={mode === 'login'} onClick={() => setMode('login')}>ログイン</button>
+          <button type="button" aria-pressed={mode === 'register'} onClick={() => setMode('register')}>新規登録</button>
+        </div>
+        <form className="au-form" onSubmit={submit}>
+          {mode === 'register' && <label className="au-label"><span>表示名</span><input className="field" required maxLength={40} value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="表示名" /></label>}
+          {message && <p className="au-error" role="alert">{message}</p>}
+          <button className="btn btn-kuro btn-wide" disabled={busy}>{busy ? '端末で確認中…' : mode === 'login' ? 'パスキーでログイン' : 'パスキーを作成'}</button>
+        </form>
+        <p className="au-note">生体情報は端末の外へ送信されません。ＦＤＥレーダーは公開鍵だけを保存します。同期型パスキーなら別の端末でも利用できます。</p>
       </div>}
     </aside>
   </>;
