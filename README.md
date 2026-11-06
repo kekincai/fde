@@ -470,11 +470,13 @@ flowchart LR
     Migration -->|"はい"| LocalDB["local migration"]
     LocalDB --> ReviewSQL["対象行と可逆性を確認"]
     ReviewSQL --> RemoteDB["remote migration"]
-    Migration -->|"いいえ"| Deploy
-    RemoteDB --> Deploy["wrangler deploy"]
-    Deploy --> Smoke["health / coverage / ingest status"]
-    Smoke --> Git["commit / push"]
+    Migration -->|"いいえ"| Push
+    RemoteDB --> Push["main へ push"]
+    Push --> Build["Workers Builds<br/>npm run build → npx wrangler deploy"]
+    Build --> Smoke["health / coverage / ingest status"]
 ```
+
+`main` への push は Cloudflare Workers Builds（`kekincai/fde` の `main` に接続済み）が自動でビルドし、`npx wrangler deploy` で本番へ出します。GitHub Actions は使いません。D1 migration は自動では実行されないため、schema 変更がある場合は push の前に remote migration を適用してください。手元から直接出す場合は従来どおり `npm run cf:deploy` も使えます。
 
 通常のリリース前に、最低限次を確認します。
 
@@ -485,7 +487,7 @@ npx tsc --noEmit
 npm run build
 npm run db:migrate:local
 npm run db:migrate:remote
-npm run cf:deploy
+git push origin main   # Workers Builds が deploy する
 ```
 
 schema 変更がないリリースで D1 migration を実行しても、適用済み migration は再実行されません。ただし、本番 migration は SQL と対象行を確認してから実行してください。
