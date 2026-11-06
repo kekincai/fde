@@ -39,6 +39,14 @@ test('uses the cached arXiv subject feed for scheduled research collection', () 
   assert.ok((source.includeTerms?.length ?? 0) >= 8);
 });
 
+test('uses Palantir official Medium publication feed to avoid Workers egress rate limits', () => {
+  const source = sourceRegistry.find((item) => item.id === 'palantir-blog');
+  assert.ok(source);
+  assert.equal(source.feedUrl, 'https://medium.com/feed/palantir');
+  assert.equal(source.homepage, 'https://blog.palantir.com/');
+  assert.equal(source.pollIntervalMinutes, 720);
+});
+
 test('does not repeatedly poll the archived Microsoft customer story', () => {
   const source = sourceRegistry.find((item) => item.id === 'microsoft-sight-machine-roi');
   assert.ok(source);
