@@ -7,6 +7,7 @@ import AuthDrawer from './radar/AuthDrawer';
 import FrontPage from './radar/FrontPage';
 import { fromApi, type ApiArticle, type CoverageChapter, type Overview, type User } from './radar/model';
 import { byScore } from './radar/typeset';
+import { installPrintFit } from './radar/print';
 import { PaperHeader, PaperProvider, SiteFooter, type PaperContextValue, type Section } from './radar/Paper';
 import QuestionsPage from './radar/QuestionsPage';
 import StoryPage from './radar/StoryPage';
@@ -61,6 +62,8 @@ export default function RadarApp() {
   const section: AnalyticsSection = view === 'admin' ? 'admin' : view === 'about' ? 'about' : channel === 'saved' ? 'saved' : channel === 'research' || channel === 'career' ? 'research' : state.region === 'Japan' ? 'japan' : 'action';
 
   const story = onStory ? seen.current.get(state.article) ?? (lookup.id === state.article ? lookup.article : null) : null;
+
+  useEffect(() => installPrintFit(), []);
 
   useEffect(() => {
     const leaveAdmin = () => update({ view: 'radar' });

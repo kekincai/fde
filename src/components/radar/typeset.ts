@@ -38,9 +38,19 @@ export function jstParts(date: Date): JstParts {
 
 /** 二〇二六年（令和八年）十一月六日　金曜日 */
 export function paperDate(date = new Date(), { era = true } = {}): string {
+  return `${paperDay(date, { era })}　${paperWeekday(date)}`;
+}
+
+/** 二〇二六年（令和八年）十一月六日 — the date without the weekday. */
+export function paperDay(date = new Date(), { era = true } = {}): string {
   const p = jstParts(date);
   const reiwa = p.year - 2018;
-  return `${kanjiDigits(p.year)}年${era ? `（令和${kanjiNum(reiwa)}年）` : ''}${kanjiNum(p.month)}月${kanjiNum(p.day)}日　${weekdays[p.weekday]}曜日`;
+  return `${kanjiDigits(p.year)}年${era ? `（令和${kanjiNum(reiwa)}年）` : ''}${kanjiNum(p.month)}月${kanjiNum(p.day)}日`;
+}
+
+/** 金曜日 */
+export function paperWeekday(date = new Date()): string {
+  return `${weekdays[jstParts(date).weekday]}曜日`;
 }
 
 /** 十一月六日 — for bylines inside vertical text. */
@@ -69,11 +79,43 @@ export function kanjiTime(value?: string | null): string {
   return `${half}${kanjiNum(hour)}時${p.minute >= 30 ? '半' : ''}`;
 }
 
-const launch = Date.UTC(2026, 5, 1) - 9 * 3_600_000;
+/** 創刊: the first issue appeared on 2026-08-09 (JST). */
+const founded = Date.UTC(2026, 7, 9);
 
-/** 朝刊 issue number: days since the paper's first edition (2026-06-01 JST). */
-export function editionNumber(date = new Date()): number {
-  return Math.max(1, Math.floor((date.getTime() - launch) / 86_400_000));
+export type Issue = {
+  /** Noon JST of the day printed on the issue. */
+  date: Date;
+  /** 朝刊 (morning) or 夕刊 (evening). */
+  kind: '朝刊' | '夕刊';
+  /** 版: lower numbers are early editions, the highest is the 最終版. */
+  han: number;
+  /** 号: issues since 創刊, counted separately for 朝刊 and 夕刊. */
+  number: number;
+};
+
+/**
+ * Collections run at 3, 9, 15 and 21 o'clock JST and map onto a printed
+ * paper's deadlines: 21時 goes into the next morning's early edition,
+ * 3時 is the 朝刊 final, 9時 and 15時 are the 夕刊 early and final editions.
+ */
+export function issueOf(collectedAt?: Date | null, now = new Date()): Issue {
+  const at = collectedAt ?? now;
+  const p = jstParts(at);
+  let dayOffset = 0;
+  let kind: Issue['kind'];
+  let han: number;
+  if (p.hour >= 21) { kind = '朝刊'; han = 12; dayOffset = 1; }
+  else if (p.hour < 3) { kind = '朝刊'; han = 12; }
+  else if (p.hour < 9) { kind = '朝刊'; han = 14; }
+  else if (p.hour < 15) { kind = '夕刊'; han = 3; }
+  else { kind = '夕刊'; han = 4; }
+  const day = Date.UTC(p.year, p.month - 1, p.day + dayOffset);
+  return {
+    date: new Date(day + 3 * 3_600_000),
+    kind,
+    han,
+    number: Math.max(1, Math.round((day - founded) / 86_400_000) + 1)
+  };
 }
 
 export function hostOf(url: string): string {

@@ -5,8 +5,9 @@
 import { createContext, useContext, type MouseEvent, type ReactNode } from 'react';
 
 import type { Article } from '../../data/articles';
-import type { CoverageChapter, Overview, User } from './model';
-import { paperDate } from './typeset';
+import { parseDate, type CoverageChapter, type Overview, type User } from './model';
+import { printPaper } from './print';
+import { issueOf, kanjiNum, paperDate } from './typeset';
 import type { RadarState } from './useRadarState';
 
 export type Section = 'front' | 'story' | 'questions' | 'japan' | 'saved' | 'about' | 'admin';
@@ -84,10 +85,11 @@ const headerNav: Array<{ to: Section; label: string }> = [
 /** Running header for 二面 and 三面: small masthead, date, page navigation, folio. */
 export function PaperHeader({ current, folio }: { current: Section; folio: ReactNode }) {
   const paper = usePaper();
+  const issue = issueOf(parseDate(paper.overview.last_ingested_at));
   const items = paper.user?.isAdmin ? [...headerNav, { to: 'admin' as Section, label: '管理' }] : headerNav;
   return <header className="running-head">
     <SectionLink to="front" className="running-daiji" label="ＦＤＥレーダー 一面へ"><Daiji /></SectionLink>
-    <span className="running-date">{paperDate(new Date(), { era: false })}</span>
+    <span className="running-date">{paperDate(issue.date, { era: false })}　{issue.kind}</span>
     <nav className="running-nav" aria-label="紙面案内">
       {items.map((item) => <SectionLink key={item.to} to={item.to} current={item.to === current}>{item.label}</SectionLink>)}
       <button type="button" className="running-account" onClick={paper.openAccount}>{paper.user ? paper.user.displayName : 'ログイン'}</button>
@@ -99,6 +101,7 @@ export function PaperHeader({ current, folio }: { current: Section; folio: React
 /** 奥付: name and motto, today's primary sources, colophon links. */
 export function SiteFooter() {
   const paper = usePaper();
+  const issue = issueOf(parseDate(paper.overview.last_ingested_at));
   const names = (paper.overview.sources ?? []).map((source) => source.name).filter(Boolean).slice(0, 10);
   return <footer className="colophon">
     <p className="colophon-name"><Daiji /><span>ＡＩを「試した」で終わらせない、現場のためのフィールドインテリジェンス</span></p>
@@ -111,6 +114,8 @@ export function SiteFooter() {
       <a href="https://github.com/kekincai/fde#privacy" target="_blank" rel="noreferrer">プライバシー</a>
       <a href="/api/overview" target="_blank" rel="noreferrer">ＡＰＩ</a>
       <a href="https://github.com/kekincai/fde" target="_blank" rel="noreferrer">GitHub</a>
+      <button type="button" className="colophon-print" onClick={printPaper}>この面を印刷（ブランケット判）</button>
     </p>
+    <p className="colophon-imprint">ＦＤＥレーダー　{paperDate(issue.date, { era: false })}　{issue.kind}　{kanjiNum(issue.han)}版　fde.kejincai.dev</p>
   </footer>;
 }

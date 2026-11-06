@@ -8,9 +8,9 @@
 import { forwardRef, useEffect, useId, useMemo, useState, type FocusEvent, type ReactNode, type Ref } from 'react';
 
 import { pillarLabels, topics, type Article, type Priority, type Region, type SortOrder } from '../../data/articles';
-import { fromApi, usefulNote, type ApiArticle, type CoverageChapter, type Pagination } from './model';
+import { fromApi, parseDate, usefulNote, type ApiArticle, type CoverageChapter, type Pagination } from './model';
 import { ArticleLink, ChapterLink, Daiji, onPlainClick, SectionLink, SiteFooter, usePaper } from './Paper';
-import { actionItems, byScore, editionNumber, jstParts, kanjiMonthDay, kanjiNum, kanjiTime, monthDay, paperDate, pillarOrder, splitHeadline, zen } from './typeset';
+import { actionItems, byScore, issueOf, jstParts, kanjiMonthDay, kanjiNum, kanjiTime, monthDay, paperDate, paperDay, paperWeekday, pillarOrder, splitHeadline, zen } from './typeset';
 import { defaultState, urlFor, type RadarState } from './useRadarState';
 
 export type FrontPageProps = {
@@ -104,9 +104,9 @@ function Keywords() {
 function Masthead({ searchRef, filtersOpen, filterCount, onToggleFilters }: { searchRef: Ref<HTMLInputElement>; filtersOpen: boolean; filterCount: number; onToggleFilters: () => void }) {
   const { state, update, overview, user, savedIds, openAccount } = usePaper();
   const counts = overview.counts ?? {};
-  const now = new Date();
-  const edition = kanjiNum(editionNumber(now));
-  const md = paperDate(now, { era: false }).replace(/^.+?年/, '');
+  const issue = issueOf(parseDate(overview.last_ingested_at));
+  const number = `第${kanjiNum(issue.number)}号`;
+  const md = paperDate(issue.date, { era: false }).replace(/^.+?年/, '');
   const onSaved = state.channel === 'saved';
   const guide: Array<{ to: 'front' | 'story' | 'questions' | 'japan' | 'saved' | 'about'; label: string; folio: string }> = [
     { to: 'front', label: 'きょうの一面', folio: '一面' },
@@ -120,10 +120,13 @@ function Masthead({ searchRef, filtersOpen, filterCount, onToggleFilters }: { se
     <SectionLink to="front" className="fp-title" label="ＦＤＥレーダー 一面へ">
       <span className="fp-daiji-box tate-always"><Daiji /></span>
       <span className="fp-dateline tate-always">
-        <span className="fp-desk">{paperDate(now)}</span>
-        <span className="fp-desk">朝刊　第{edition}号</span>
-        <span className="fp-mob">{md}　朝刊</span>
-        <span className="fp-mob fp-dim">第{edition}号</span>
+        <span className="fp-desk">{paperDay(issue.date)}</span>
+        <span className="fp-desk">{paperWeekday(issue.date)}</span>
+        <span className="fp-desk">{issue.kind}　{number}</span>
+        <span className="fp-desk fp-dim">{kanjiNum(issue.han)}版</span>
+        <span className="fp-mob">{md}</span>
+        <span className="fp-mob">{issue.kind}　{kanjiNum(issue.han)}版</span>
+        <span className="fp-mob fp-dim">{number}</span>
       </span>
     </SectionLink>
 
