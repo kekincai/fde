@@ -32,7 +32,7 @@ export type SourceRecord = {
   backfillPages?: number;
   backfillMode?: 'feed-window' | 'api-page' | 'feed-page';
   stream?: CollectionStream;
-  semanticPolicy?: 'required' | 'fallback' | 'none';
+  semanticPolicy?: 'required' | 'none';
   dailyItemCap?: number;
   includeTerms?: string[];
   excludeTerms?: string[];

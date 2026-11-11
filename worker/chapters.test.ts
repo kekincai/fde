@@ -24,6 +24,12 @@ test('maps adoption and training to change management', () => {
   assert.equal(inferChapter('Organization', '全社研修でAI利用を現場へ定着'), 'organization.change');
 });
 
+test('maps English AI-native wording regardless of case', () => {
+  assert.equal(inferChapter('Organization', 'Becoming an AI-Native Company'), 'organization.ai-native');
+  assert.equal(inferChapter('Organization', 'AI Native operating model'), 'organization.ai-native');
+  assert.equal(inferChapter('Organization', 'ＡＩネイティブな組織へ'), 'organization.ai-native');
+});
+
 test('gives every chapter at least three configured sources', () => {
   for (const chapter of chapterDefinitions) {
     const sources = sourceRegistry.filter((source) => source.enabled !== false && chaptersFor(source).includes(chapter.id));

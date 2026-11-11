@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { evaluateCandidate, SEMANTIC_REVIEW_POLICY } from './intelligence.ts';
+import { evaluateCandidate, isBeforePublicBaseline, SEMANTIC_REVIEW_POLICY, semanticConfidence } from './intelligence.ts';
 import type { SourceRecord } from './sourceRegistry.ts';
 
 const source: SourceRecord = {
@@ -81,4 +81,24 @@ test('accepts an official Japanese AI guideline as governance evidence', () => {
   });
   assert.equal(result.decision, 'publish');
   assert.ok(result.reasons.includes('control-context'));
+});
+
+test('normalizes model confidence to 0-1 and keeps unreadable values below the publish gate', () => {
+  assert.equal(semanticConfidence(0.8), 0.8);
+  assert.equal(semanticConfidence(85), 0.85);
+  assert.equal(semanticConfidence('0.7'), 0.7);
+  assert.equal(semanticConfidence(250), 1);
+  assert.equal(semanticConfidence(-3), 0);
+  for (const unreadable of [undefined, null, 'high', NaN]) {
+    assert.ok(semanticConfidence(unreadable) < 0.62);
+  }
+});
+
+test('keeps items before the 2026-06-01 JST baseline out, but never drops unreadable dates', () => {
+  assert.equal(isBeforePublicBaseline('2026-05-20T00:00:00.000Z'), true);
+  assert.equal(isBeforePublicBaseline('2026-05-31T14:59:59.000Z'), true);
+  assert.equal(isBeforePublicBaseline('2026-05-31T15:00:00.000Z'), false);
+  assert.equal(isBeforePublicBaseline('2026-09-01T00:00:00.000Z'), false);
+  assert.equal(isBeforePublicBaseline(''), false);
+  assert.equal(isBeforePublicBaseline('not a date'), false);
 });

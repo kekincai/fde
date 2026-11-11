@@ -1,16 +1,16 @@
 /// <reference types="@cloudflare/workers-types" />
 
-import { XMLParser } from 'fast-xml-parser';
 import {
   generateAuthenticationOptions,
   generateRegistrationOptions,
   verifyAuthenticationResponse,
   verifyRegistrationResponse,
   type AuthenticationResponseJSON,
-  type AuthenticatorTransportFuture,
+  type AuthenticatorTransport,
   type RegistrationResponseJSON
 } from '@simplewebauthn/server';
 import { Hono } from 'hono';
+import { cache } from 'hono/cache';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import postgres from 'postgres';
 
@@ -26,17 +26,26 @@ import {
 } from './emailNotifications';
 import {
   FETCH_USER_AGENT,
+  ingestFailureKind,
   isDeferredYoutubeFeedFailure,
-  isPermanentFetchFailure,
   isYoutubeFeedSource,
   shouldRetryYoutubeFeedFailure,
   sourceBackoffSeconds,
+  willRetryInQueue,
+  QUEUE_MAX_RETRIES,
   youtubeFeedRetryUrl
 } from './fetchPolicy';
 import { BodyTooLargeError, consumeRequestLimit, hasConfiguredBearerToken, isPublicAnalyticsEvent, readLimitedText } from './securityControls';
 import { chaptersFor, collectionStreamFor, sourceRegistry, type ContentType, type FdePillar, type SourceKind, type SourceRecord } from './sourceRegistry';
-import { evaluateCandidate, reviewWithWorkersAI, type SemanticDecision } from './intelligence';
-import { parseYoutubeChannelPage } from './youtubeFallback';
+import { evaluateCandidate, isBeforePublicBaseline, PUBLIC_BASELINE, reviewWithWorkersAI, SEMANTIC_MODEL, type SemanticDecision } from './intelligence';
+import {
+  AI_PATTERN, BUILD_PATTERN, CUSTOMER_PATTERN, DELIVERY_PATTERN, DEPLOY_PATTERN,
+  GOVERN_PATTERN, ORG_PATTERN, QUALITY_PATTERN, ROLE_PATTERN
+} from './vocabulary';
+import {
+  cleanText, compactTags, parseApiResponse, parseHtmlResponse, parseRssResponse, parseYoutubeHtmlResponse,
+  type CorePillar, type DiscoveredItem
+} from './parsers';
 
 export type IngestMessage = {
   sourceIds?: string[];
@@ -49,6 +58,8 @@ type IngestOptions = {
   mode: 'scheduled' | 'manual' | 'backfill';
   since?: string;
   page?: number;
+  /** True when the Queue will deliver this run again; the failure is then recorded by the last attempt only. */
+  willRetry?: (failure: FetchFailure) => boolean;
 };
 
 type Env = {
@@ -63,6 +74,8 @@ type Env = {
   EMAIL_TEST_TOKEN?: string;
   RESEND_API_KEY?: string;
   RESEND_TO?: string;
+  RESEND_FROM?: string;
+  CF_VERSION_METADATA?: WorkerVersionMetadata;
 };
 
 type DbSourceRow = {
@@ -88,28 +101,11 @@ type DbSourceRow = {
   backoff_until: string | null;
 };
 
-type DiscoveredItem = {
-  externalItemId: string;
-  url: string;
-  title: string;
-  summary: string;
-  publishedAt: string;
-  tags: string[];
-  signalType: string;
-  location: string;
-  sector: string;
-  countryRelevance: 'JP' | 'APAC' | 'GLOBAL';
-  fdeScore: number;
-  pillar?: FdePillar;
-  subtopic?: string;
-  contentType?: ContentType;
-  summaryJa?: string;
-  summaryZh?: string;
-  timeConfidence?: number;
-};
 
 type FetchMeta = {
   mode: SourceRecord['fetchMode'];
+  /** Fetched from the source's first surface (the one the stored validators belong to). */
+  primary: boolean;
   etag?: string | null;
   lastModified?: string | null;
   notModified?: boolean;
@@ -123,49 +119,37 @@ const SESSION_COOKIE = 'fde_session';
 const SESSION_DAYS = 30;
 const app = new Hono<{ Bindings: Env }>();
 
-const ROLE_PATTERN = /(forward deployed|deployment engineer|deployment engineering|applied ai (engineer|architect)|technical deployment lead|customer deployment|beneficial deployments|フォワード.?デプロイド|AI導入エンジニア|AIソリューションエンジニア)/i;
-const AI_PATTERN = /\b(ai|artificial intelligence|llm|large language model|generative ai|genai|agentic|gpt|chatgpt|codex|claude|gemini|bedrock|copilot|aip|workers ai)\b|生成AI|人工知能/i;
-const FIELD_PATTERN = /(customer|client|enterprise|government|public sector|現場|顧客|企業)/i;
-const DELIVERY_PATTERN = /(deploy|deployment|production|rollout|adoption|implementation|integrat|workflow|pilot|本番|導入|実装|運用)/i;
-const QUALITY_PATTERN = /(eval|evaluation|reliability|observability|guardrail|security|governance|safety|品質|評価|安全|ガバナンス)/i;
-const BUILD_PATTERN = /(agent|rag|retrieval|tool use|computer use|coding|codex|mcp|connector|integration|legacy|エージェント|検索|連携|コード)/i;
-const DEPLOY_PATTERN = /(cloud|on.?prem|identity|permission|data residency|database|observability|latency|cost|production|deploy|運用|本番|権限|認証|データ|コスト)/i;
-const GOVERN_PATTERN = /(security|privacy|regulat|policy|governance|evaluation|evals|reliability|prompt injection|安全|規制|指針|ガイドライン|評価|品質|プライバシー)/i;
-const ORG_PATTERN = /(forward deployed|\bfde\b|fdse|deployment strategist|ai coe|center of excellence|change management|ai.native|組織|人材|採用|内製化)/i;
-const CUSTOMER_PATTERN = /(customer stor|case stud|use case|business process|roi|adoption|transformation|customer|client|導入事例|業務|顧客|活用事例|効果)/i;
+/** What the public paper shows. Every public read (list, single, overview, coverage, digest, bookmarks) uses it. */
+const VISIBLE = "status = 'published' AND fde_score >= 40";
+const VISIBLE_A = "a.status = 'published' AND a.fde_score >= 40";
+
+/** Edge cache for public, cookie-free reads; the TTL comes from each response's s-maxage. */
+const edgeCache = cache({ cacheName: 'fde-public-api', wait: false, onCacheNotAvailable: false });
 
 app.get('/api/health', (c) => c.json({
   ok: true,
-  service: 'ai-fde-radar-api',
-  version: '2026-08-24-email-notifications-v1',
+  service: 'fde-radar',
+  // Set by Cloudflare for each deployed Worker version (wrangler.toml [version_metadata]).
+  version: c.env.CF_VERSION_METADATA?.id ?? 'local',
+  deployedAt: c.env.CF_VERSION_METADATA?.timestamp ?? null,
   architecture: 'Astro + Hono + Workers + Workers AI + D1/FTS5 + Hyperdrive/PostgreSQL + KV + Queues',
   time: new Date().toISOString()
 }));
 
-app.get('/api/config', (c) => c.json({
-  pillars: ['すべて', 'Customer', 'Build', 'Deploy', 'Govern', 'Organization'],
-  types: ['すべて', 'news', 'blog', 'video', 'paper', 'report', 'release', 'case-study', 'career'],
-  regions: ['ALL', 'Japan', 'Global'],
-  priorities: ['ALL', 'P0', 'P1', 'P2'],
-  topics: ['Identity', 'Observability', 'Integration', 'Cost', 'Evaluation', 'Human-in-the-loop', 'Change Management'],
-  channels: ['action', 'research', 'career'],
-  sorts: ['newest', 'priority', 'published']
-}));
 
-app.get('/api/articles', async (c) => {
+app.get('/api/articles', edgeCache, async (c) => {
   const query = c.req.query('q')?.trim() ?? '';
   const region = c.req.query('region') ?? 'ALL';
-  const pillar = c.req.query('pillar') ?? c.req.query('topic') ?? 'すべて';
+  const pillar = c.req.query('pillar') ?? 'すべて';
   const priority = c.req.query('priority') ?? 'ALL';
   const topicLayer = c.req.query('layer')?.trim() ?? '';
   const chapter = c.req.query('chapter')?.trim() ?? '';
   const channel = c.req.query('channel') ?? 'action';
-  const contentType = c.req.query('type') ?? 'すべて';
   const sort = normalizeArticleSort(c.req.query('sort'));
   const page = Math.max(Number(c.req.query('page') ?? 1) || 1, 1);
   const pageSize = Math.min(Math.max(Number(c.req.query('pageSize') ?? 10) || 10, 1), 25);
   try {
-    const clauses = ["a.status = 'published'", 'a.fde_score >= 40'];
+    const clauses = [VISIBLE_A];
     const values: Array<string | number> = [];
     if (region !== 'ALL') {
       clauses.push('a.region = ?');
@@ -187,10 +171,6 @@ app.get('/api/articles', async (c) => {
     if (!chapter && channel === 'research') clauses.push("a.content_type IN ('paper', 'report')");
     if (!chapter && channel === 'career') clauses.push("a.content_type = 'career'");
     if (!chapter && channel === 'action') clauses.push("a.content_type NOT IN ('paper', 'report', 'career')");
-    if (contentType !== 'すべて') {
-      clauses.push('a.content_type = ?');
-      values.push(contentType);
-    }
     const searchQuery = query ? buildFtsQuery(query) : '';
     const from = searchQuery
       ? 'articles_fts f JOIN articles a ON a.id = f.article_id JOIN sources s ON s.id = a.source_id'
@@ -214,25 +194,24 @@ app.get('/api/articles', async (c) => {
     const total = Number(count?.total ?? 0);
     return c.json({
       articles: result.results,
-      pagination: { page, pageSize, total, totalPages: Math.max(1, Math.ceil(total / pageSize)) },
-      source: searchQuery ? 'd1-fts5' : 'd1'
+      pagination: { page, pageSize, total, totalPages: Math.max(1, Math.ceil(total / pageSize)) }
     }, 200, {
       'Cache-Control': 'public, max-age=30, s-maxage=300'
     });
   } catch (error) {
-    return c.json({ articles: [], source: 'unavailable', error: errorMessage(error) }, 503);
+    return c.json({ articles: [], error: errorMessage(error) }, 503);
   }
 });
 
 // One article for direct 二面 links (`/?a=<id>`). Same visibility rules as the list.
-app.get('/api/articles/:articleId', async (c) => {
+app.get('/api/articles/:articleId', edgeCache, async (c) => {
   const id = c.req.param('articleId');
   if (!/^[A-Za-z0-9-]{1,64}$/.test(id)) return c.json({ article: null, error: 'invalid id' }, 400);
   try {
     const article = await c.env.DB.prepare(
       `SELECT a.*, s.name AS source_name, s.source_kind
        FROM articles a JOIN sources s ON s.id = a.source_id
-       WHERE a.id = ? AND a.status = 'published' AND a.fde_score >= 40`
+       WHERE a.id = ? AND ${VISIBLE_A}`
     ).bind(id).first();
     if (!article) return c.json({ article: null }, 404, { 'Cache-Control': 'public, max-age=30' });
     return c.json({ article }, 200, { 'Cache-Control': 'public, max-age=60, s-maxage=300' });
@@ -241,35 +220,31 @@ app.get('/api/articles/:articleId', async (c) => {
   }
 });
 
-app.get('/api/overview', async (c) => {
+app.get('/api/overview', edgeCache, async (c) => {
   try {
     const [counts, sources, latest] = await Promise.all([
       c.env.DB.prepare(
         `SELECT COUNT(*) AS total,
           SUM(CASE WHEN region = 'Japan' THEN 1 ELSE 0 END) AS japan,
-          SUM(CASE WHEN content_type = 'career' THEN 1 ELSE 0 END) AS careers,
-          SUM(CASE WHEN content_type = 'paper' THEN 1 ELSE 0 END) AS papers,
-          SUM(CASE WHEN content_type = 'video' THEN 1 ELSE 0 END) AS videos,
           SUM(CASE WHEN priority_level = 'P0' AND content_type NOT IN ('paper', 'report', 'career') THEN 1 ELSE 0 END) AS p0,
           SUM(CASE WHEN priority_level = 'P1' AND content_type NOT IN ('paper', 'report', 'career') THEN 1 ELSE 0 END) AS p1,
           SUM(CASE WHEN priority_level = 'P2' AND content_type NOT IN ('paper', 'report', 'career') THEN 1 ELSE 0 END) AS p2
-         FROM articles WHERE status = 'published' AND fde_score >= 40`
+         FROM articles WHERE ${VISIBLE}`
       ).first(),
       c.env.DB.prepare(
-        `SELECT id, name, source_kind, content_type, default_pillar, source_tier, homepage,
-                last_success_at, last_error_at, consecutive_failures
-         FROM sources WHERE allowed_fetch = 1 ORDER BY priority DESC`
+        `SELECT id, name FROM sources WHERE allowed_fetch = 1 ORDER BY priority DESC`
       ).all(),
+      // The last successful collection run, whether or not it found anything new. This is what
+      // 「最終収集」 and the 朝刊/夕刊 edition mean.
       c.env.DB.prepare(
-        `SELECT MAX(discovered_at) AS last_ingested_at, MAX(published_at) AS latest_published_at
-         FROM articles WHERE status = 'published' AND fde_score >= 40`
+        `SELECT MAX(last_success_at) AS last_ingested_at FROM sources WHERE allowed_fetch = 1`
       ).first()
     ]);
     return c.json({ counts, sources: sources.results, ...latest }, 200, {
       'Cache-Control': 'public, max-age=15, s-maxage=60'
     });
   } catch (error) {
-    return c.json({ counts: { total: 0, japan: 0, careers: 0 }, sources: [], error: errorMessage(error) }, 503);
+    return c.json({ counts: { total: 0, japan: 0, p0: 0, p1: 0, p2: 0 }, sources: [], last_ingested_at: null, error: errorMessage(error) }, 503);
   }
 });
 
@@ -315,7 +290,7 @@ app.post('/api/auth/passkey/register/verify', async (c) => {
       c.env.DB.prepare(
         `INSERT INTO passkey_credentials (id, user_id, public_key, counter, transports, device_type, backed_up)
          VALUES (?, ?, ?, ?, ?, ?, ?)`
-      ).bind(credential.id, state.user_id, credential.publicKey.buffer, credential.counter, JSON.stringify(credential.transports ?? []), credentialDeviceType, credentialBackedUp ? 1 : 0),
+      ).bind(credential.id, state.user_id, credential.publicKey.slice().buffer, credential.counter, JSON.stringify(credential.transports ?? []), credentialDeviceType, credentialBackedUp ? 1 : 0),
       c.env.DB.prepare('DELETE FROM auth_challenges WHERE id = ?').bind(payload.flowId)
     ]);
     const session = await createSession(c.env, state.user_id, c.req.header('user-agent') ?? '');
@@ -354,7 +329,7 @@ app.post('/api/auth/passkey/login/verify', async (c) => {
   try {
     const verification = await verifyAuthenticationResponse({
       response: payload.response, expectedChallenge: challengeRow.challenge, expectedOrigin: origin, expectedRPID: rpID, requireUserVerification: true,
-      credential: { id: credential.id, publicKey: new Uint8Array(credential.public_key), counter: credential.counter, transports: JSON.parse(credential.transports) as AuthenticatorTransportFuture[] }
+      credential: { id: credential.id, publicKey: new Uint8Array(credential.public_key), counter: credential.counter, transports: JSON.parse(credential.transports) as AuthenticatorTransport[] }
     });
     if (!verification.verified) return c.json({ error: 'パスキーを確認できませんでした。' }, 401);
     await c.env.DB.prepare('UPDATE passkey_credentials SET counter = ?, last_used_at = CURRENT_TIMESTAMP WHERE id = ?').bind(verification.authenticationInfo.newCounter, credential.id).run();
@@ -412,7 +387,8 @@ app.get('/api/bookmarks', async (c) => {
   const page = Math.max(Number(c.req.query('page') ?? 1) || 1, 1);
   const pageSize = Math.min(Math.max(Number(c.req.query('pageSize') ?? 10) || 10, 1), 25);
   const query = c.req.query('q')?.trim() ?? '';
-  const clauses = ['b.user_id = ?'];
+  // Saved articles that were later suppressed or archived drop out, like everywhere else.
+  const clauses = ['b.user_id = ?', VISIBLE_A];
   const values: Array<string | number> = [session.userId];
   const region = c.req.query('region') ?? 'ALL';
   const pillar = c.req.query('pillar') ?? 'すべて';
@@ -433,7 +409,7 @@ app.get('/api/bookmarks', async (c) => {
   const [count, rows] = await Promise.all([
     c.env.DB.prepare(`SELECT COUNT(*) AS total FROM ${from} WHERE ${clauses.join(' AND ')}`).bind(...values).first<{ total: number }>(),
     c.env.DB.prepare(
-      `SELECT a.*, s.name AS source_name, s.source_kind, b.created_at AS bookmarked_at
+      `SELECT a.*, s.name AS source_name, s.source_kind
        FROM ${from} WHERE ${clauses.join(' AND ')}
        ORDER BY ${articleOrderBy(sort)} LIMIT ? OFFSET ?`
     ).bind(...values, pageSize, (page - 1) * pageSize).all()
@@ -447,14 +423,13 @@ app.put('/api/bookmarks/:articleId', async (c) => {
   const session = await readSession(c.env, getCookie(c, SESSION_COOKIE));
   if (!session) return c.json({ error: 'ログインが必要です。' }, 401);
   const articleId = c.req.param('articleId');
-  const exists = await c.env.DB.prepare("SELECT id FROM articles WHERE id = ? AND status = 'published'").bind(articleId).first();
+  const exists = await c.env.DB.prepare(`SELECT id FROM articles WHERE id = ? AND ${VISIBLE}`).bind(articleId).first();
   if (!exists) return c.json({ error: '記事が見つかりません。' }, 404);
   const inserted = await c.env.DB.prepare('INSERT OR IGNORE INTO user_bookmarks (user_id, article_id) VALUES (?, ?)')
     .bind(session.userId, articleId).run();
-  if (inserted.meta.changes) await c.env.DB.batch([
-    c.env.DB.prepare("INSERT INTO user_actions (id, user_id, article_id, action) VALUES (?, ?, ?, 'saved')").bind(crypto.randomUUID(), session.userId, articleId),
-    c.env.DB.prepare("INSERT INTO analytics_events (id, event_name, user_id, article_id, section) VALUES (?, 'bookmark_save', ?, ?, 'saved')").bind(crypto.randomUUID(), session.userId, articleId)
-  ]);
+  if (inserted.meta.changes) await c.env.DB.prepare(
+    "INSERT INTO analytics_events (id, event_name, user_id, article_id, section) VALUES (?, 'bookmark_save', ?, ?, 'saved')"
+  ).bind(crypto.randomUUID(), session.userId, articleId).run();
   return c.json({ saved: true });
 });
 
@@ -465,20 +440,12 @@ app.delete('/api/bookmarks/:articleId', async (c) => {
   const articleId = c.req.param('articleId');
   const deleted = await c.env.DB.prepare('DELETE FROM user_bookmarks WHERE user_id = ? AND article_id = ?')
     .bind(session.userId, articleId).run();
-  if (deleted.meta.changes) await c.env.DB.batch([
-    c.env.DB.prepare("INSERT INTO user_actions (id, user_id, article_id, action) VALUES (?, ?, ?, 'unsaved')").bind(crypto.randomUUID(), session.userId, articleId),
-    c.env.DB.prepare("INSERT INTO analytics_events (id, event_name, user_id, article_id, section) VALUES (?, 'bookmark_remove', ?, ?, 'saved')").bind(crypto.randomUUID(), session.userId, articleId)
-  ]);
+  if (deleted.meta.changes) await c.env.DB.prepare(
+    "INSERT INTO analytics_events (id, event_name, user_id, article_id, section) VALUES (?, 'bookmark_remove', ?, ?, 'saved')"
+  ).bind(crypto.randomUUID(), session.userId, articleId).run();
   return c.json({ saved: false });
 });
 
-app.post('/api/articles/:articleId/open', async (c) => {
-  if (!sameOrigin(c.req.raw)) return c.json({ ok: false }, 403);
-  const session = await readSession(c.env, getCookie(c, SESSION_COOKIE));
-  if (session) await c.env.DB.prepare("INSERT INTO user_actions (id, user_id, article_id, action) VALUES (?, ?, ?, 'opened')")
-    .bind(crypto.randomUUID(), session.userId, c.req.param('articleId')).run().catch(() => undefined);
-  return c.json({ ok: true });
-});
 
 app.post('/api/analytics/events', async (c) => {
   if (!sameOrigin(c.req.raw)) return c.json({ ok: false }, 403);
@@ -540,14 +507,9 @@ app.get('/api/admin/analytics', async (c) => {
           SUM(CASE WHEN occurred_at >= current_start AND event_name = 'page_view' THEN 1 ELSE 0 END) AS page_views,
           SUM(CASE WHEN occurred_at >= current_start AND event_name = 'article_open' THEN 1 ELSE 0 END) AS article_opens,
           SUM(CASE WHEN occurred_at >= current_start AND event_name = 'source_click' THEN 1 ELSE 0 END) AS source_clicks,
-          SUM(CASE WHEN occurred_at >= current_start AND event_name = 'bookmark_save' THEN 1 ELSE 0 END) AS bookmark_saves,
           COUNT(DISTINCT CASE WHEN occurred_at >= current_start THEN CASE WHEN user_id IS NOT NULL THEN user_id ELSE anonymous_id_hash END END) AS visitors,
-          COUNT(DISTINCT CASE WHEN occurred_at >= current_start AND json_extract(metadata, '$.sessionIdHash') != '' THEN json_extract(metadata, '$.sessionIdHash') END) AS sessions,
           SUM(CASE WHEN occurred_at < current_start AND event_name = 'page_view' THEN 1 ELSE 0 END) AS previous_page_views,
-          SUM(CASE WHEN occurred_at < current_start AND event_name = 'article_open' THEN 1 ELSE 0 END) AS previous_article_opens,
-          SUM(CASE WHEN occurred_at < current_start AND event_name = 'source_click' THEN 1 ELSE 0 END) AS previous_source_clicks,
           COUNT(DISTINCT CASE WHEN occurred_at < current_start THEN CASE WHEN user_id IS NOT NULL THEN user_id ELSE anonymous_id_hash END END) AS previous_visitors,
-          MIN(CASE WHEN occurred_at >= current_start THEN occurred_at END) AS first_event_at,
           MAX(CASE WHEN occurred_at >= current_start THEN occurred_at END) AS last_event_at
          FROM analytics_events, bounds WHERE occurred_at >= previous_start`
       ).bind(currentStart, previousStart).first(),
@@ -627,38 +589,45 @@ app.get('/api/admin/analytics', async (c) => {
           SUM(CASE WHEN status IN ('success', 'not_modified') THEN 1 ELSE 0 END) AS successful_runs,
           SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS failed_runs,
           SUM(unique_count) AS new_articles
-         FROM fetch_runs WHERE started_at >= datetime('now', ?, 'start of day', '-9 hours')`
+         FROM fetch_runs WHERE datetime(started_at) >= datetime('now', ?, 'start of day', '-9 hours')`
       ).bind(currentStart).first(),
       c.env.DB.prepare(
         `SELECT
-          SUM(status = 'published') AS published_articles,
+          SUM(${VISIBLE}) AS published_articles,
           SUM(status = 'suppressed') AS suppressed_articles,
-          COUNT(DISTINCT CASE WHEN status = 'published' THEN source_id END) AS active_sources,
-          MAX(CASE WHEN status = 'published' THEN created_at END) AS latest_article_at
+          COUNT(DISTINCT CASE WHEN ${VISIBLE} THEN source_id END) AS active_sources,
+          MAX(CASE WHEN ${VISIBLE} THEN created_at END) AS latest_article_at
          FROM articles`
       ).first(),
       c.env.DB.prepare(
-        `SELECT id, name, last_success_at, last_error_at, consecutive_failures, backoff_until
+        `SELECT id, name, last_success_at, consecutive_failures
          FROM sources WHERE allowed_fetch = 1
          ORDER BY consecutive_failures DESC, COALESCE(last_success_at, '') ASC, name LIMIT 12`
       ).all()
     ]);
-    const ingestRuns = Number((ingest as { runs?: number } | null)?.runs ?? 0);
-    const successfulRuns = Number((ingest as { successful_runs?: number } | null)?.successful_runs ?? 0);
+    const { runs: ingestRuns = 0, ...ingestTotals } = (ingest ?? {}) as { runs?: number; successful_runs?: number; failed_runs?: number; new_articles?: number };
+    const successfulRuns = Number(ingestTotals.successful_runs ?? 0);
     return c.json({
       days, metrics, users, trend: trend.results, popularArticles: popularArticles.results,
       sections: sections.results, devices: devices.results, referrers: referrers.results,
       timeBands: timeBands.results, inventory,
-      ingest: { ...ingest, successRate: ingestRuns ? Math.round(successfulRuns / ingestRuns * 1000) / 10 : 100 },
-      sourceHealth: sourceHealth.results, measuredSince: new Date(Date.now() - (days - 1) * 86_400_000).toISOString(),
-      timezone: 'Asia/Tokyo'
+      ingest: { ...ingestTotals, successRate: ingestRuns ? Math.round(successfulRuns / Number(ingestRuns) * 1000) / 10 : 100 },
+      sourceHealth: sourceHealth.results
     });
   } catch (error) {
     return c.json({ error: errorMessage(error) }, 503);
   }
 });
 
+// Error messages, backoff and failure counts are operational detail: admins (session) or the
+// operator holding INGEST_TOKEN (smoke tests via curl) only.
 app.get('/api/ingest/status', async (c) => {
+  if (!isAuthorized(c.req.raw, c.env)) {
+    const session = await readSession(c.env, getCookie(c, SESSION_COOKIE));
+    if (!session) return c.json({ error: 'ログインが必要です。' }, 401);
+    if (!session.isAdmin) return c.json({ error: '管理者権限が必要です。' }, 403);
+  }
+  c.header('Cache-Control', 'private, no-store');
   try {
     const [sources, runs, candidates, quality] = await Promise.all([
       c.env.DB.prepare(
@@ -694,16 +663,14 @@ app.get('/api/ingest/status', async (c) => {
   }
 });
 
-app.get('/api/coverage', async (c) => {
+app.get('/api/coverage', edgeCache, async (c) => {
   try {
     const [articleCoverage, sourceCoverage] = await Promise.all([
       c.env.DB.prepare(
         `SELECT chapter_id, COUNT(*) AS published_count,
-                SUM(CASE WHEN region = 'Japan' THEN 1 ELSE 0 END) AS japan_count,
-                SUM(CASE WHEN recommended_action <> '' THEN 1 ELSE 0 END) AS actionable_count,
-                MAX(published_at) AS latest_published_at
-         FROM articles WHERE status = 'published' GROUP BY chapter_id`
-      ).all<{ chapter_id: string; published_count: number; japan_count: number; actionable_count: number; latest_published_at: string | null }>(),
+                SUM(CASE WHEN region = 'Japan' THEN 1 ELSE 0 END) AS japan_count
+         FROM articles WHERE ${VISIBLE} GROUP BY chapter_id`
+      ).all<{ chapter_id: string; published_count: number; japan_count: number }>(),
       c.env.DB.prepare(
         `SELECT j.value AS chapter_id, COUNT(DISTINCT s.id) AS source_count
          FROM sources s, json_each(s.chapter_targets) j
@@ -722,21 +689,11 @@ app.get('/api/coverage', async (c) => {
         publishedCount,
         sourceCount,
         japanCount: Number(articles?.japan_count ?? 0),
-        actionableCount: Number(articles?.actionable_count ?? 0),
-        latestPublishedAt: articles?.latest_published_at ?? null,
         status: publishedCount >= chapter.minimumPublished && sourceCount >= chapter.minimumSources
           ? 'healthy' : publishedCount > 0 && sourceCount > 0 ? 'thin' : 'empty'
       };
     });
-    return c.json({
-      chapters,
-      summary: {
-        healthy: chapters.filter((chapter) => chapter.status === 'healthy').length,
-        thin: chapters.filter((chapter) => chapter.status === 'thin').length,
-        empty: chapters.filter((chapter) => chapter.status === 'empty').length,
-        total: chapters.length
-      }
-    });
+    return c.json({ chapters }, 200, { 'Cache-Control': 'public, max-age=60, s-maxage=300' });
   } catch (error) {
     return c.json({ chapters: [], error: errorMessage(error) }, 503);
   }
@@ -755,7 +712,6 @@ app.post('/api/ingest/dispatch', async (c) => {
     ));
   }
   await c.env.INGEST_QUEUE.sendBatch(sourceIds.map((sourceId) => ({ body: { sourceIds: [sourceId], reason: 'manual' as const } })));
-  await c.env.CACHE.put('ingest:last-dispatch', new Date().toISOString(), { expirationTtl: 172800 });
   return c.json({ queued: sourceIds.length, sourceIds });
 });
 
@@ -784,7 +740,6 @@ app.post('/api/ingest/backfill', async (c) => {
   for (let index = 0; index < messages.length; index += 100) {
     await c.env.INGEST_QUEUE.sendBatch(messages.slice(index, index + 100));
   }
-  await c.env.CACHE.put('backfill:last-dispatch', JSON.stringify({ since, queued: messages.length, at: new Date().toISOString() }), { expirationTtl: 604800 });
   return c.json({ queued: messages.length, since, sources: sourcePages.map(({ source, pages }) => ({ id: source.id, pages })) });
 });
 
@@ -800,26 +755,26 @@ app.post('/api/ingest/email/test', async (c) => {
   }
 });
 
+const registryById = new Map(sourceRegistry.map((source) => [source.id, source]));
+
 async function readSources(env: Env, sourceIds?: string[], force = false): Promise<SourceRecord[]> {
   const now = new Date().toISOString();
   try {
     const eligibilityClause = force ? '' : `AND (backoff_until IS NULL OR backoff_until <= ?)
       AND (last_success_at IS NULL OR datetime(last_success_at, '+' || poll_interval_minutes || ' minutes') <= datetime(?))`;
-    const statement = env.DB.prepare(
+    const ids = sourceIds?.length ? sourceIds.slice(0, 90) : [];
+    const idClause = ids.length ? `AND id IN (${ids.map(() => '?').join(', ')})` : '';
+    const result = await env.DB.prepare(
       `SELECT id, name, homepage, feed_url, api_url, fetch_mode, language, country, source_kind,
               content_type, default_pillar, source_tier, source_weight, min_fde_score,
               priority, poll_interval_minutes, etag, last_modified, consecutive_failures, backoff_until
        FROM sources
-       WHERE allowed_fetch = 1 ${eligibilityClause}
+       WHERE allowed_fetch = 1 ${eligibilityClause} ${idClause}
        ORDER BY priority DESC`
-    );
-    const result = force
-      ? await statement.all<DbSourceRow>()
-      : await statement.bind(now, now).all<DbSourceRow>();
+    ).bind(...(force ? [] : [now, now]), ...ids).all<DbSourceRow>();
     return result.results
-      .filter((source) => !sourceIds?.length || sourceIds.includes(source.id))
       .map((source) => {
-        const registrySource = sourceRegistry.find((item) => item.id === source.id);
+        const registrySource = registryById.get(source.id);
         return {
           id: source.id,
           name: source.name,
@@ -889,6 +844,12 @@ async function syncSourceRegistry(env: Env): Promise<void> {
   for (let index = 0; index < statements.length; index += 20) {
     await env.DB.batch(statements.slice(index, index + 20));
   }
+  // A source deleted from the registry file (rather than set to enabled: false) must stop too.
+  const known = sourceRegistry.map((source) => source.id);
+  await env.DB.prepare(
+    `UPDATE sources SET allowed_fetch = 0, updated_at = CURRENT_TIMESTAMP
+     WHERE allowed_fetch = 1 AND id NOT IN (SELECT value FROM json_each(?))`
+  ).bind(JSON.stringify(known)).run();
 }
 
 async function fetchSourceItems(source: SourceRecord, options: IngestOptions): Promise<{ items: DiscoveredItem[]; meta: FetchMeta }> {
@@ -900,13 +861,16 @@ async function fetchSourceItems(source: SourceRecord, options: IngestOptions): P
     { mode: 'html' as const, url: source.fetchMode === 'html' ? source.homepage : youtubeVideosUrl }
   ].filter((candidate): candidate is { mode: SourceRecord['fetchMode']; url: string } => Boolean(candidate.url));
   let lastError: FetchFailure | undefined;
-  for (const candidate of candidates) {
+  for (const [index, candidate] of candidates.entries()) {
+    // The stored ETag / Last-Modified belong to the primary surface; sending an RSS ETag to a
+    // fallback HTML page would be meaningless, and storing the fallback's would break the next RSS request.
+    const primary = index === 0;
     try {
       const requestUrl = options.mode === 'backfill'
         ? buildBackfillUrl(source, candidate.url, options)
         : candidate.url;
-      const result = await fetchWithPolicy(source, requestUrl, options.mode === 'backfill');
-      if (result.notModified) return { items: [], meta: { ...result, mode: candidate.mode } };
+      const result = await fetchWithPolicy(source, requestUrl, options.mode === 'backfill' || !primary);
+      if (result.notModified) return { items: [], meta: { ...result, mode: candidate.mode, primary } };
       const discovered = candidate.mode === 'api'
         ? parseApiResponse(source, result.body)
         : candidate.mode === 'rss'
@@ -928,7 +892,7 @@ async function fetchSourceItems(source: SourceRecord, options: IngestOptions): P
         ...item,
         timeConfidence: item.timeConfidence ?? (candidate.mode === 'api' || candidate.mode === 'rss' ? 0.9 : undefined)
       }));
-      return { items, meta: { ...result, mode: candidate.mode } };
+      return { items, meta: { ...result, mode: candidate.mode, primary } };
     } catch (error) {
       lastError = error as FetchFailure;
     }
@@ -936,26 +900,6 @@ async function fetchSourceItems(source: SourceRecord, options: IngestOptions): P
   throw lastError ?? new Error(`${source.name}: no fetch surface configured`);
 }
 
-function parseYoutubeHtmlResponse(source: SourceRecord, body: string): DiscoveredItem[] {
-  return parseYoutubeChannelPage(body).flatMap((video) => {
-    const haystack = video.title;
-    if (!AI_PATTERN.test(haystack) && !ROLE_PATTERN.test(haystack)) return [];
-    return [{
-      externalItemId: video.videoId,
-      url: `https://www.youtube.com/watch?v=${video.videoId}`,
-      title: video.title,
-      summary: `${source.name}が公開したAI導入・運用に関する動画です。`,
-      publishedAt: video.publishedAt,
-      tags: compactTags(extractKeywords(haystack)),
-      signalType: inferSignalType(haystack),
-      location: inferLocation(haystack),
-      sector: inferSector(haystack),
-      countryRelevance: source.country === 'JP' ? 'JP' : inferRegion(haystack),
-      fdeScore: scoreFde(haystack, false),
-      timeConfidence: video.timeConfidence
-    }];
-  });
-}
 
 async function fetchWithPolicy(source: SourceRecord, url: string, unconditional = false): Promise<{ body: string; etag: string | null; lastModified: string | null; notModified?: boolean }> {
   const headers = new Headers({
@@ -991,7 +935,7 @@ async function fetchWithPolicy(source: SourceRecord, url: string, unconditional 
   try {
     body = await readLimitedText(response, MAX_BODY_BYTES);
   } catch (error) {
-    if (error instanceof BodyTooLargeError) throw new Error(`${source.name}: response exceeds ${MAX_BODY_BYTES} bytes`);
+    if (error instanceof BodyTooLargeError) throw new Error(`${source.name}: response exceeds ${MAX_BODY_BYTES} bytes`, { cause: error });
     throw error;
   }
   return { body, etag: response.headers.get('etag'), lastModified: response.headers.get('last-modified') };
@@ -1000,13 +944,13 @@ async function fetchWithPolicy(source: SourceRecord, url: string, unconditional 
 function buildBackfillUrl(source: SourceRecord, rawUrl: string, options: IngestOptions): string {
   const url = new URL(rawUrl);
   const page = Math.max(1, options.page ?? 1);
-  if (source.id === 'qiita-fde') {
+  if (source.backfillMode === 'api-page' && url.hostname === 'qiita.com') {
     const sinceDay = (options.since ?? '').slice(0, 10);
     const baseQuery = url.searchParams.get('query') ?? '';
     url.searchParams.set('query', `(${baseQuery}) created:>=${sinceDay}`);
     url.searchParams.set('per_page', '100');
     url.searchParams.set('page', String(page));
-  } else if (source.id === 'arxiv-fde-research' && url.pathname.includes('/api/query')) {
+  } else if (source.backfillMode === 'api-page' && url.pathname.includes('/api/query')) {
     url.searchParams.set('start', String((page - 1) * 100));
     url.searchParams.set('max_results', '100');
   } else if (source.backfillMode === 'feed-page') {
@@ -1015,179 +959,23 @@ function buildBackfillUrl(source: SourceRecord, rawUrl: string, options: IngestO
   return url.toString();
 }
 
-function parseApiResponse(source: SourceRecord, body: string): DiscoveredItem[] {
-  const json = JSON.parse(body) as { jobs?: Array<Record<string, unknown>> } | Array<Record<string, unknown>>;
-  const rawItems = Array.isArray(json) ? json : json.jobs ?? [];
-  return rawItems.slice(0, 800).flatMap((item) => {
-    if (source.id === 'qiita-fde') return parseQiitaItem(item);
-    const title = cleanText(String(item.title ?? item.name ?? ''));
-    const location = cleanText(String((item.location as Record<string, unknown> | undefined)?.name ?? ''));
-    const content = cleanText(String(item.content ?? item.description ?? ''));
-    const haystack = `${title} ${content} ${(source.includeTerms ?? []).join(' ')}`;
-    if (!ROLE_PATTERN.test(title) || !AI_PATTERN.test(haystack)) return [];
-    const score = scoreFde(haystack, true);
-    const url = String(item.absolute_url ?? item.url ?? '');
-    if (!url || !title) return [];
-    const company = source.name.replace(' Careers', '');
-    return [{
-      externalItemId: String(item.id ?? url),
-      url,
-      title,
-      summary: `${company}が${location || '複数地域'}で募集する、顧客のAI導入を設計から本番運用まで担うポジションです。`,
-      publishedAt: safeIsoDate(String(item.updated_at ?? item.created_at ?? Date.now())),
-      tags: compactTags(['FDE', 'AI deployment', location, ...extractKeywords(haystack)]),
-      signalType: '採用・役割',
-      location,
-      sector: inferSector(haystack),
-      countryRelevance: inferRegion(location),
-      fdeScore: score
-    }];
-  });
-}
 
-function parseQiitaItem(item: Record<string, unknown>): DiscoveredItem[] {
-  const title = cleanText(String(item.title ?? ''));
-  const body = cleanText(String(item.body ?? item.rendered_body ?? '')).slice(0, 12_000);
-  const tags = Array.isArray(item.tags)
-    ? item.tags.map((tag) => cleanText(String((tag as Record<string, unknown>)?.name ?? ''))).filter(Boolean)
-    : [];
-  const haystack = `${title} ${body} ${tags.join(' ')}`;
-  const score = scoreFde(haystack, false);
-  const url = String(item.url ?? '');
-  if (!url || !title || score < 4 || !passesCommunityGate(title, haystack)) return [];
-  return [{
-    externalItemId: String(item.id ?? url),
-    url,
-    title,
-    summary: body.slice(0, 300),
-    publishedAt: safeIsoDate(String(item.updated_at ?? item.created_at ?? Date.now())),
-    tags: compactTags([...tags, ...extractKeywords(haystack)]),
-    signalType: inferSignalType(haystack),
-    location: '日本',
-    sector: inferSector(haystack),
-    countryRelevance: 'JP',
-    fdeScore: score
-  }];
-}
 
-function parseRssResponse(source: SourceRecord, body: string, maxEntries = 60): DiscoveredItem[] {
-  const parsed = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_' }).parse(body);
-  const entries = parsed.feed?.entry ?? parsed.rss?.channel?.item ?? parsed.channel?.item ?? [];
-  const list = Array.isArray(entries) ? entries : [entries];
-  return list.slice(0, maxEntries).flatMap((entry) => {
-    const link = readFeedLink(entry?.link, source.homepage);
-    const title = cleanText(String(entry?.title ?? ''));
-    const rawSummary = cleanText(String(
-      entry?.summary ?? entry?.description ?? entry?.['content:encoded']
-      ?? entry?.['media:group']?.['media:description'] ?? ''
-    ));
-    const tags = extractFeedTags(entry?.category);
-    const haystack = `${title} ${rawSummary} ${tags.join(' ')}`;
-    const score = scoreFde(haystack, false);
-    if (!link || !title) return [];
-    if (source.includeTerms?.length && !source.includeTerms.some((term) => haystack.toLowerCase().includes(term.toLowerCase()))) return [];
-    if (!AI_PATTERN.test(haystack) && !ROLE_PATTERN.test(haystack) && source.kind !== 'report') return [];
-    if (source.kind === 'community' && !passesCommunityGate(title, haystack)) return [];
-    if (source.id === 'yahoo-japan-it' && !(AI_PATTERN.test(title) && FIELD_PATTERN.test(haystack) && (DELIVERY_PATTERN.test(haystack) || QUALITY_PATTERN.test(haystack)))) return [];
-    const signalType = inferSignalType(haystack);
-    const location = inferLocation(haystack);
-    return [{
-      externalItemId: String(entry?.guid?.['#text'] ?? entry?.guid ?? entry?.id ?? link),
-      url: link,
-      title,
-      summary: rawSummary.slice(0, 300) || `${source.name}が公開したAI導入・運用に関する更新です。`,
-      publishedAt: safeIsoDate(String(entry?.published ?? entry?.pubDate ?? entry?.updated ?? Date.now())),
-      tags: compactTags([...tags, ...extractKeywords(haystack)]),
-      signalType,
-      location,
-      sector: inferSector(haystack),
-      countryRelevance: source.country === 'JP' ? 'JP' : inferRegion(location || haystack),
-      fdeScore: score
-    }];
-  });
-}
 
-async function parseHtmlResponse(source: SourceRecord, body: string): Promise<DiscoveredItem[]> {
-  if (source.parseMode === 'page') return parseSingleCareerPage(source, body);
-  const candidates: DiscoveredItem[] = [];
-  let active: { url: string; title: string } | undefined;
-  const rewriter = new HTMLRewriter().on('main a[href]', {
-    element(element) {
-      const href = element.getAttribute('href');
-      if (!href) return;
-      try { active = { url: new URL(href, source.homepage).toString(), title: '' }; } catch { active = undefined; }
-      const current = active;
-      element.onEndTag(() => {
-        if (!current) return;
-        const title = cleanText(current.title);
-        const score = scoreFde(title, source.kind === 'careers');
-        const isRelevantCareer = source.kind !== 'careers' || ROLE_PATTERN.test(title);
-        if (title.length >= 8 && isRelevantCareer && (AI_PATTERN.test(title) || ROLE_PATTERN.test(title))) candidates.push({
-          externalItemId: current.url,
-          url: current.url,
-          title,
-          summary: `${source.name}の公式ページで確認された更新です。`,
-          publishedAt: dateFromTitle(title) ?? new Date().toISOString(),
-          tags: compactTags(extractKeywords(title)),
-          signalType: source.kind === 'careers' ? '採用・役割' : inferSignalType(title),
-          location: inferLocation(title),
-          sector: inferSector(title),
-          countryRelevance: source.country === 'JP' ? 'JP' : inferRegion(title),
-          fdeScore: score
-        });
-        if (active === current) active = undefined;
-      });
-    },
-    text(text) { if (active) active.title += text.text; }
-  });
-  await rewriter.transform(new Response(body, { headers: { 'content-type': 'text/html; charset=utf-8' } })).arrayBuffer();
-  return candidates.slice(0, 50);
-}
 
-async function parseSingleCareerPage(source: SourceRecord, body: string): Promise<DiscoveredItem[]> {
-  let title = '';
-  let description = '';
-  let publishedAt = '';
-  const rewriter = new HTMLRewriter()
-    .on('title', { text(text) { title += text.text; } })
-    .on('meta[name="description"]', { element(element) { description = element.getAttribute('content') ?? ''; } })
-    .on('meta[property="article:published_time"]', { element(element) { publishedAt ||= element.getAttribute('content') ?? ''; } })
-    .on('meta[name="date"]', { element(element) { publishedAt ||= element.getAttribute('content') ?? ''; } })
-    .on('time[datetime]', { element(element) { publishedAt ||= element.getAttribute('datetime') ?? ''; } });
-  await rewriter.transform(new Response(body, { headers: { 'content-type': 'text/html; charset=utf-8' } })).arrayBuffer();
-  title = cleanText(title);
-  description = cleanText(description);
-  const haystack = `${title} ${description}`;
-  const score = scoreFde(haystack, source.kind === 'careers');
-  if (!title || (!AI_PATTERN.test(haystack) && source.kind !== 'government' && source.kind !== 'report' && source.kind !== 'careers')) return [];
-  return [{
-    externalItemId: source.homepage,
-    url: source.homepage,
-    title,
-    summary: description.slice(0, 300),
-    publishedAt: safeIsoDate(publishedAt || dateFromTitle(title) || new Date().toISOString()),
-    tags: compactTags([source.kind === 'careers' ? 'FDE' : source.defaultPillar, 'AI', ...extractKeywords(haystack)]),
-    signalType: source.kind === 'careers' ? '採用・役割' : inferSignalType(haystack),
-    location: source.country === 'JP' ? '日本' : inferLocation(haystack),
-    sector: inferSector(haystack),
-    countryRelevance: source.country === 'JP' ? 'JP' : inferRegion(haystack),
-    fdeScore: score
-  }];
-}
 
-async function recordCandidate(
+type CandidateStatus = 'pending' | 'published' | 'rejected';
+
+function candidateStatement(
   env: Env,
   source: SourceRecord,
-  candidateId: string,
-  canonicalUrl: string,
-  contentHash: string,
-  item: DiscoveredItem,
+  candidate: PreparedItem,
   gate: ReturnType<typeof evaluateCandidate>,
-  semantic?: SemanticDecision,
-  status: 'pending' | 'published' | 'rejected' = 'pending',
+  semantic: SemanticDecision | undefined,
+  status: CandidateStatus,
   articleId?: string
-): Promise<void> {
-  await env.DB.prepare(
+): D1PreparedStatement {
+  return env.DB.prepare(
     `INSERT INTO ingest_candidates
       (id, source_id, canonical_url, content_hash, payload, hard_gate_decision, hard_gate_score,
        hard_gate_reasons, semantic_decision, semantic_confidence, semantic_model, rejection_reason,
@@ -1201,18 +989,35 @@ async function recordCandidate(
        status = excluded.status, last_seen_at = CURRENT_TIMESTAMP,
        analyzed_at = excluded.analyzed_at, published_article_id = excluded.published_article_id`
   ).bind(
-    candidateId, source.id, canonicalUrl, contentHash, JSON.stringify(item), gate.decision, gate.score,
-    JSON.stringify(gate.reasons), semantic?.decision ?? (status === 'rejected' ? 'skipped' : 'pending'), semantic?.confidence ?? 0,
-    semantic ? '@cf/meta/llama-3.1-8b-instruct-fast' : '', semantic?.rejectionReason ?? '', status,
+    candidate.candidateId, source.id, candidate.canonicalUrl, candidate.contentHash, JSON.stringify(candidate.item),
+    gate.decision, gate.score, JSON.stringify(gate.reasons),
+    semantic?.decision ?? (status === 'rejected' ? 'skipped' : 'pending'), semantic?.confidence ?? 0,
+    semantic ? SEMANTIC_MODEL : '', semantic?.rejectionReason ?? '', status,
     semantic ? new Date().toISOString() : null, articleId ?? null
-  ).run();
+  );
+}
+
+async function recordCandidate(
+  env: Env,
+  source: SourceRecord,
+  candidate: PreparedItem,
+  gate: ReturnType<typeof evaluateCandidate>,
+  semantic: SemanticDecision | undefined,
+  status: CandidateStatus,
+  articleId?: string
+): Promise<void> {
+  await candidateStatement(env, source, candidate, gate, semantic, status, articleId).run();
+}
+
+/** The JST calendar day, the one unit of "day" used by quotas, quality stats, the digest and the paper. */
+function jstDay(date = new Date()): string {
+  return new Date(date.getTime() + 9 * 3_600_000).toISOString().slice(0, 10);
 }
 
 async function recordSourceQuality(env: Env, sourceId: string, values: {
   discovered: number; hardRejected: number; semanticReviewed: number; semanticRejected: number;
   published: number; duplicates: number; aiErrors: number;
 }): Promise<void> {
-  const day = new Date().toISOString().slice(0, 10);
   await env.DB.prepare(
     `INSERT INTO source_quality_daily
       (source_id, day, discovered_count, hard_rejected_count, semantic_reviewed_count,
@@ -1226,8 +1031,36 @@ async function recordSourceQuality(env: Env, sourceId: string, values: {
        published_count = published_count + excluded.published_count,
        duplicate_count = duplicate_count + excluded.duplicate_count,
        ai_error_count = ai_error_count + excluded.ai_error_count`
-  ).bind(sourceId, day, values.discovered, values.hardRejected, values.semanticReviewed,
+  ).bind(sourceId, jstDay(), values.discovered, values.hardRejected, values.semanticReviewed,
     values.semanticRejected, values.published, values.duplicates, values.aiErrors).run();
+}
+
+type PreparedItem = { item: DiscoveredItem; canonicalUrl: string; contentHash: string; candidateId: string };
+type KnownCandidate = { id: string; status: string; semantic_decision: string; published_article_id: string | null };
+
+/** D1 binds at most 100 parameters per statement. */
+const D1_CHUNK = 90;
+
+function chunks<T>(values: T[], size = D1_CHUNK): T[][] {
+  const result: T[][] = [];
+  for (let index = 0; index < values.length; index += size) result.push(values.slice(index, index + size));
+  return result;
+}
+
+async function readKnownCandidates(env: Env, ids: string[]): Promise<Map<string, KnownCandidate>> {
+  const known = new Map<string, KnownCandidate>();
+  for (const part of chunks(ids)) {
+    const rows = await env.DB.prepare(
+      `SELECT id, status, semantic_decision, published_article_id FROM ingest_candidates
+       WHERE id IN (${part.map(() => '?').join(', ')})`
+    ).bind(...part).all<KnownCandidate>();
+    for (const row of rows.results) known.set(row.id, row);
+  }
+  return known;
+}
+
+async function runInBatches(env: Env, statements: D1PreparedStatement[]): Promise<void> {
+  for (const part of chunks(statements, 50)) await env.DB.batch(part);
 }
 
 async function ingestSource(env: Env, source: SourceRecord, options: IngestOptions): Promise<{ discovered: number; unique: number }> {
@@ -1237,7 +1070,7 @@ async function ingestSource(env: Env, source: SourceRecord, options: IngestOptio
     const result = await fetchSourceItems(source, options);
     const previousQuality = await env.DB.prepare(
       `SELECT semantic_reviewed_count FROM source_quality_daily WHERE source_id = ? AND day = ?`
-    ).bind(source.id, new Date().toISOString().slice(0, 10)).first<{ semantic_reviewed_count: number }>();
+    ).bind(source.id, jstDay()).first<{ semantic_reviewed_count: number }>();
     let semanticBudget = Math.max(0, (source.dailyItemCap ?? 20) - Number(previousQuality?.semantic_reviewed_count ?? 0));
     let unique = 0;
     let hardRejected = 0;
@@ -1246,38 +1079,78 @@ async function ingestSource(env: Env, source: SourceRecord, options: IngestOptio
     let published = 0;
     let duplicates = 0;
     let aiErrors = 0;
+
+    // Hash everything first so already-known items are found with a few queries, not one per item.
+    const prepared: PreparedItem[] = [];
     for (const item of result.items) {
       const canonicalUrl = normalizeUrl(item.url);
       if (!canonicalUrl || item.title.length < 4) continue;
       const contentHash = await sha256(`${item.title}\n${item.summary}\n${item.tags.join(' ')}`);
-      const candidateId = await sha256(`${source.id}\n${canonicalUrl}\n${contentHash}`);
-      const priorCandidate = await env.DB.prepare(
-        `SELECT status, published_article_id FROM ingest_candidates
-         WHERE source_id = ? AND canonical_url = ? AND content_hash = ?`
-      ).bind(source.id, canonicalUrl, contentHash).first<{ status: string; published_article_id: string | null }>();
-      if (priorCandidate?.status === 'published' || priorCandidate?.status === 'rejected') {
-        if (priorCandidate.status === 'published' && priorCandidate.published_article_id && item.timeConfidence !== undefined) {
-          await env.DB.prepare(
+      prepared.push({ item, canonicalUrl, contentHash, candidateId: await sha256(`${source.id}\n${canonicalUrl}\n${contentHash}`) });
+    }
+    const known = await readKnownCandidates(env, prepared.map((entry) => entry.candidateId));
+    const seenAgain: string[] = [];
+    const timeUpdates: D1PreparedStatement[] = [];
+
+    for (const candidate of prepared) {
+      const { item, canonicalUrl, contentHash } = candidate;
+      const prior = known.get(candidate.candidateId);
+      // A pending row whose semantic_decision is no longer 'pending' already has an AI verdict
+      // (review, or publish below the confidence gate). The same content would get the same
+      // verdict at temperature 0, so only budget/AI-error pendings are retried. Requeue migrations
+      // reset semantic_decision to 'pending' to force a new review.
+      const alreadyReviewed = prior?.status === 'pending' && prior.semantic_decision !== 'pending';
+      if (prior && (prior.status === 'published' || prior.status === 'rejected' || alreadyReviewed)) {
+        if (prior.status === 'published' && prior.published_article_id && item.timeConfidence !== undefined) {
+          // Only a timestamp at least as precise, and only when it actually differs.
+          timeUpdates.push(env.DB.prepare(
             `UPDATE articles SET published_at = ?, published_at_original = ?, source_updated_at = ?,
-               crawl_run_at = ?, time_confidence = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-          ).bind(item.publishedAt, item.publishedAt, item.publishedAt, new Date().toISOString(),
-            item.timeConfidence, priorCandidate.published_article_id).run();
+               crawl_run_at = ?, time_confidence = ?, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ? AND COALESCE(time_confidence, 0) <= ?
+               AND (published_at IS NOT ? OR time_confidence IS NOT ?)`
+          ).bind(item.publishedAt, item.publishedAt, item.publishedAt, new Date().toISOString(), item.timeConfidence,
+            prior.published_article_id, item.timeConfidence, item.publishedAt, item.timeConfidence));
         }
         duplicates += 1;
-        await env.DB.prepare('UPDATE ingest_candidates SET last_seen_at = CURRENT_TIMESTAMP WHERE id = ?').bind(candidateId).run();
+        seenAgain.push(candidate.candidateId);
+        continue;
+      }
+      if (isBeforePublicBaseline(item.publishedAt)) {
+        hardRejected += 1;
+        const gate = evaluateCandidate(source, item);
+        await recordCandidate(env, source, candidate,
+          { ...gate, decision: 'reject', reasons: [...gate.reasons, 'published before the public baseline'] }, undefined, 'rejected');
         continue;
       }
       const gate = evaluateCandidate(source, item);
       if (gate.decision === 'reject' || gate.score < source.minScore) {
         hardRejected += 1;
-        await recordCandidate(env, source, candidateId, canonicalUrl, contentHash, item, gate, undefined, 'rejected');
+        await recordCandidate(env, source, candidate, gate, undefined, 'rejected');
+        continue;
+      }
+      const existing = await env.DB.prepare(
+        'SELECT id, content_hash, time_confidence, status FROM articles WHERE canonical_url = ?'
+      ).bind(canonicalUrl).first<{ id: string; content_hash: string | null; time_confidence: number | null; status: string }>();
+      // Suppressed and archived articles were taken down on purpose (migrations 0014/0015/0021).
+      // A changed title or summary must not bring them back; restoring one is a migration's job.
+      if (existing && (existing.status === 'suppressed' || existing.status === 'archived')) {
+        duplicates += 1;
+        await recordCandidate(env, source, candidate,
+          { ...gate, decision: 'reject', reasons: [...gate.reasons, `article is ${existing.status}`] }, undefined, 'rejected');
+        continue;
+      }
+      // Fallback surfaces (e.g. the YouTube channel page when RSS fails) produce a template summary
+      // and an approximate date. Their content hash differs from the RSS copy, so without this check
+      // they would overwrite the real description and exact timestamp of an already published article.
+      if (existing && Number(existing.time_confidence ?? 0) > itemTimeConfidence(source, item)) {
+        duplicates += 1;
+        await recordCandidate(env, source, candidate, gate, undefined, 'published', existing.id);
         continue;
       }
       let semantic: SemanticDecision | undefined;
-      const semanticPolicy = source.semanticPolicy ?? 'required';
-      if (semanticPolicy === 'required' || (semanticPolicy === 'fallback' && gate.decision === 'review')) {
+      if ((source.semanticPolicy ?? 'required') === 'required') {
         if (semanticBudget <= 0) {
-          await recordCandidate(env, source, candidateId, canonicalUrl, contentHash, item, gate, undefined, 'pending');
+          await recordCandidate(env, source, candidate, gate, undefined, 'pending');
           continue;
         }
         semanticBudget -= 1;
@@ -1287,146 +1160,25 @@ async function ingestSource(env: Env, source: SourceRecord, options: IngestOptio
         } catch (error) {
           aiErrors += 1;
           console.error('semantic review failed', source.id, errorMessage(error));
-          await recordCandidate(env, source, candidateId, canonicalUrl, contentHash, item, gate, undefined, 'pending');
+          await recordCandidate(env, source, candidate, gate, undefined, 'pending');
           continue;
         }
         if (semantic.decision !== 'publish' || semantic.confidence < 0.62) {
           if (semantic.decision === 'reject') semanticRejected += 1;
-          await recordCandidate(env, source, candidateId, canonicalUrl, contentHash, item, gate, semantic,
-            semantic.decision === 'reject' ? 'rejected' : 'pending');
+          await recordCandidate(env, source, candidate, gate, semantic, semantic.decision === 'reject' ? 'rejected' : 'pending');
           continue;
         }
       }
-      const existing = await env.DB.prepare(
-        'SELECT id, content_hash FROM articles WHERE canonical_url = ?'
-      ).bind(canonicalUrl).first<{ id: string; content_hash: string | null }>();
-      const id = existing?.id ?? crypto.randomUUID();
-      const urlHash = await sha256(canonicalUrl);
-      const titleNormalized = item.title.normalize('NFKC').toLowerCase();
-      const searchTokensJa = tokenizeJapanese(`${item.title} ${item.summary} ${item.summaryJa} ${item.tags.join(' ')} ${item.location} ${item.sector} ${item.pillar} ${item.subtopic}`);
-      const impacts = inferImpactTags(source, item);
-      const intelligence = inferIntelligence(source, item);
-      const stored = await env.DB.prepare(
-        `INSERT INTO articles
-        (id, canonical_url, canonical_url_hash, external_item_id, source_id, title, title_normalized,
-         summary, language, country_relevance, topic, tags, search_tokens_ja, published_at,
-         japan_score, quality_score, trend_score, signal_type, location, sector, fde_score,
-         why_it_matters, company_impact, career_impact, pillar, subtopic, content_type, region,
-         summary_ja, summary_zh, customer_impact, engineering_impact,
-         relevance_tags, business_impact_tags, engineering_impact_tags,
-         content_hash, status, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, 'published', CURRENT_TIMESTAMP)
-        ON CONFLICT(canonical_url) DO UPDATE SET
-          external_item_id = excluded.external_item_id,
-          source_id = excluded.source_id,
-          title = excluded.title,
-          title_normalized = excluded.title_normalized,
-          summary = excluded.summary,
-          language = excluded.language,
-          country_relevance = excluded.country_relevance,
-          topic = excluded.topic,
-          tags = excluded.tags,
-          search_tokens_ja = excluded.search_tokens_ja,
-          published_at = excluded.published_at,
-          japan_score = excluded.japan_score,
-          quality_score = excluded.quality_score,
-          trend_score = excluded.trend_score,
-          signal_type = excluded.signal_type,
-          location = excluded.location,
-          sector = excluded.sector,
-          fde_score = excluded.fde_score,
-          why_it_matters = excluded.why_it_matters,
-          company_impact = excluded.company_impact,
-          career_impact = excluded.career_impact,
-          pillar = excluded.pillar,
-          subtopic = excluded.subtopic,
-          content_type = excluded.content_type,
-          region = excluded.region,
-          summary_ja = excluded.summary_ja,
-          summary_zh = excluded.summary_zh,
-          customer_impact = excluded.customer_impact,
-          engineering_impact = excluded.engineering_impact,
-          relevance_tags = excluded.relevance_tags,
-          business_impact_tags = excluded.business_impact_tags,
-          engineering_impact_tags = excluded.engineering_impact_tags,
-          content_hash = excluded.content_hash,
-          status = 'published',
-          updated_at = CURRENT_TIMESTAMP
-        RETURNING id`
-      ).bind(
-        id, canonicalUrl, urlHash, item.externalItemId, source.id, item.title, titleNormalized,
-        item.summary, source.language, item.countryRelevance, item.signalType, item.tags.join(' '),
-        searchTokensJa, item.publishedAt, item.countryRelevance === 'JP' ? 1 : item.countryRelevance === 'APAC' ? 0.75 : 0.45,
-        source.weight / 100, item.fdeScore / 100, item.signalType, item.location, item.sector,
-        item.fdeScore, '', '', '',
-        item.pillar ?? source.defaultPillar, item.subtopic ?? '', item.contentType ?? source.contentType,
-        item.countryRelevance === 'JP' ? 'Japan' : 'Global', item.summaryJa ?? '', item.summaryZh ?? '',
-        '', '', JSON.stringify(impacts.relevance), JSON.stringify(impacts.business),
-        JSON.stringify(impacts.engineering), contentHash
-      ).first<{ id: string }>();
-      if (stored?.id) {
-        const seenAt = new Date().toISOString();
-        await env.DB.prepare(
-          `UPDATE articles SET core_pillar = ?, japan_lens = ?, topic_layers = ?, affected_stack = ?,
-             priority_level = ?, recommended_action = ?, evidence = ?, relevance_score = ?,
-             actionability_score = ?, authority_score = ?, novelty_score = ?, client_fit_score = ?,
-             priority_score = ?, published_at_original = ?,
-             first_seen_at = CASE WHEN first_seen_at = '' THEN COALESCE(discovered_at, created_at) ELSE first_seen_at END,
-             last_seen_at = ?, source_updated_at = ?, crawl_run_at = ?, time_confidence = ?, dedup_confidence = 1
-           WHERE id = ?`
-        ).bind(
-          intelligence.corePillar, intelligence.japanLens, JSON.stringify(intelligence.topicLayers),
-          JSON.stringify(intelligence.affectedStack), intelligence.priorityLevel, intelligence.recommendedAction,
-          intelligence.evidence, intelligence.relevanceScore, intelligence.actionabilityScore,
-          intelligence.authorityScore, intelligence.noveltyScore, intelligence.clientFitScore,
-          intelligence.priorityScore, item.publishedAt, seenAt, item.publishedAt, seenAt,
-          intelligence.timeConfidence, stored.id
-        ).run();
-        await env.DB.prepare('DELETE FROM articles_fts WHERE article_id = ?').bind(stored.id).run();
-        await env.DB.prepare(
-          'INSERT INTO articles_fts (article_id, title, summary, tags, search_tokens_ja) VALUES (?, ?, ?, ?, ?)'
-        ).bind(stored.id, item.title, item.summaryJa ?? item.summary, item.tags.join(' '), searchTokensJa).run();
-        await env.DB.prepare(
-          `UPDATE articles SET semantic_decision = ?, semantic_confidence = ?, semantic_model = ?,
-             semantic_analyzed_at = ?, rejection_reason = '', collection_stream = ?, event_fingerprint = ?,
-             core_pillar = COALESCE(?, core_pillar), topic_layers = CASE WHEN ? <> '[]' THEN ? ELSE topic_layers END,
-             signal_type = COALESCE(?, signal_type), relevance_score = COALESCE(?, relevance_score),
-             actionability_score = COALESCE(?, actionability_score), client_fit_score = COALESCE(?, client_fit_score),
-             why_it_matters = CASE WHEN ? <> '' THEN ? ELSE why_it_matters END,
-             recommended_action = CASE WHEN ? <> '' THEN ? ELSE recommended_action END,
-             evidence = CASE WHEN ? <> '' THEN ? ELSE evidence END, chapter_id = ?
-           WHERE id = ?`
-        ).bind(
-          semantic?.decision ?? 'rules', semantic?.confidence ?? 1,
-          semantic ? '@cf/meta/llama-3.1-8b-instruct-fast' : '', semantic ? new Date().toISOString() : null,
-          collectionStreamFor(source), await sha256(titleNormalized.replace(/\b20\d{2}\b/g, '')),
-          semantic?.corePillar ?? null, JSON.stringify(semantic?.topics ?? []), JSON.stringify(semantic?.topics ?? []),
-          semantic?.signalType ?? null, semantic?.relevanceScore ?? null, semantic?.actionabilityScore ?? null,
-          semantic?.clientFitScore ?? null, semantic?.whyItMattersJa ?? '', semantic?.whyItMattersJa ?? '',
-          semantic?.recommendedActionJa ?? '', semantic?.recommendedActionJa ?? '',
-          semantic?.evidenceJa ?? '', semantic?.evidenceJa ?? '',
-          source.fixedChapter ?? ((item.contentType ?? source.contentType) === 'career'
-            ? 'organization.talent'
-            : inferChapter(semantic?.corePillar ?? intelligence.corePillar,
-              `${item.title} ${item.summary} ${(semantic?.topics ?? intelligence.topicLayers).join(' ')}`)),
-          stored.id
-        ).run();
-        await recordCandidate(env, source, candidateId, canonicalUrl, contentHash, item, gate, semantic, 'published', stored.id);
-        published += 1;
-      }
-      if (!existing || existing.content_hash !== contentHash) {
-        unique += 1;
-        await env.DB.prepare(
-          `INSERT OR IGNORE INTO article_versions
-           (id, article_id, source_id, content_hash, title, summary, captured_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`
-        ).bind(crypto.randomUUID(), id, source.id, contentHash, item.title, item.summary, new Date().toISOString()).run();
-      } else duplicates += 1;
+      if (await publishArticle(env, source, candidate, gate, semantic, existing?.id)) published += 1;
+      if (!existing || existing.content_hash !== contentHash) unique += 1;
+      else duplicates += 1;
+    }
+
+    await runInBatches(env, timeUpdates);
+    for (const part of chunks(seenAgain)) {
+      await env.DB.prepare(
+        `UPDATE ingest_candidates SET last_seen_at = CURRENT_TIMESTAMP WHERE id IN (${part.map(() => '?').join(', ')})`
+      ).bind(...part).run();
     }
     await recordSourceQuality(env, source.id, {
       discovered: result.items.length, hardRejected, semanticReviewed, semanticRejected,
@@ -1442,18 +1194,17 @@ async function ingestSource(env: Env, source: SourceRecord, options: IngestOptio
     ).run();
     if (options.mode !== 'backfill') await markSourceSuccess(env, source, result.meta);
     if (!result.meta.notModified) {
-      await persistArchive(env, source, result.items, result.meta.mode, startedAt).catch(async (error) => {
-        const detail = {
+      await persistArchive(env, source, result.items, result.meta.mode, startedAt).catch((error) => {
+        console.error({
           event: 'ingest_archive_failed', sourceId: source.id,
           message: errorMessage(error), occurredAt: new Date().toISOString()
-        };
-        console.error(detail);
-        await env.CACHE.put(`ingest:archive-error:${source.id}`, JSON.stringify(detail), { expirationTtl: 604_800 }).catch(() => undefined);
+        });
       });
     }
     return { discovered: result.items.length, unique };
   } catch (error) {
     const failure = error as FetchFailure;
+    if (options.willRetry?.(failure)) throw error;
     await env.DB.prepare(
       `INSERT INTO fetch_runs
        (id, source_id, status, error_message, started_at, finished_at, ingest_mode, backfill_page, since_at)
@@ -1465,6 +1216,103 @@ async function ingestSource(env: Env, source: SourceRecord, options: IngestOptio
     if (options.mode !== 'backfill') await markSourceFailure(env, source, failure);
     throw error;
   }
+}
+
+/**
+ * Upserts one article: the row itself, then everything derived from it in a single D1 batch
+ * (intelligence and semantic fields, the FTS row, the candidate record).
+ */
+async function publishArticle(
+  env: Env,
+  source: SourceRecord,
+  candidate: PreparedItem,
+  gate: ReturnType<typeof evaluateCandidate>,
+  semantic: SemanticDecision | undefined,
+  existingId: string | undefined
+): Promise<string | undefined> {
+  const { item, canonicalUrl, contentHash } = candidate;
+  const id = existingId ?? crypto.randomUUID();
+  const searchTokensJa = tokenizeJapanese(`${item.title} ${item.summary} ${item.summaryJa} ${item.tags.join(' ')} ${item.location} ${item.sector} ${item.pillar} ${item.subtopic}`);
+  const intelligence = inferIntelligence(source, item);
+  const stored = await env.DB.prepare(
+    `INSERT INTO articles
+    (id, canonical_url, canonical_url_hash, external_item_id, source_id, title, title_normalized, summary, language,
+     country_relevance, tags, search_tokens_ja, published_at, signal_type, location, sector, fde_score,
+     why_it_matters, pillar, subtopic, content_type, region, summary_ja, relevance_tags,
+     content_hash, status, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, 'published', CURRENT_TIMESTAMP)
+    ON CONFLICT(canonical_url) DO UPDATE SET
+      external_item_id = excluded.external_item_id,
+      source_id = excluded.source_id,
+      title = excluded.title,
+      title_normalized = excluded.title_normalized,
+      summary = excluded.summary,
+      language = excluded.language,
+      country_relevance = excluded.country_relevance,
+      tags = excluded.tags,
+      search_tokens_ja = excluded.search_tokens_ja,
+      published_at = excluded.published_at,
+      signal_type = excluded.signal_type,
+      location = excluded.location,
+      sector = excluded.sector,
+      fde_score = excluded.fde_score,
+      why_it_matters = excluded.why_it_matters,
+      pillar = excluded.pillar,
+      subtopic = excluded.subtopic,
+      content_type = excluded.content_type,
+      region = excluded.region,
+      summary_ja = excluded.summary_ja,
+      relevance_tags = excluded.relevance_tags,
+      content_hash = excluded.content_hash,
+      status = CASE WHEN articles.status IN ('suppressed', 'archived') THEN articles.status ELSE 'published' END,
+      updated_at = CURRENT_TIMESTAMP
+    RETURNING id`
+  ).bind(
+    id, canonicalUrl, await sha256(canonicalUrl), item.externalItemId, source.id, item.title,
+    item.title.normalize('NFKC').toLowerCase(), item.summary, source.language, item.countryRelevance, item.tags.join(' '), searchTokensJa,
+    item.publishedAt, item.signalType, item.location, item.sector, item.fdeScore ?? 0,
+    item.pillar ?? intelligence.corePillar, item.subtopic ?? '', item.contentType ?? source.contentType,
+    item.countryRelevance === 'JP' ? 'Japan' : 'Global', item.summaryJa ?? '',
+    JSON.stringify(inferRelevanceTags(source, item)), contentHash
+  ).first<{ id: string }>();
+  if (!stored?.id) return undefined;
+  const seenAt = new Date().toISOString();
+  const topics = semantic?.topics.length ? semantic.topics : intelligence.topicLayers;
+  const corePillar = semantic?.corePillar ?? intelligence.corePillar;
+  const chapterId = source.fixedChapter ?? ((item.contentType ?? source.contentType) === 'career'
+    ? 'organization.talent'
+    : inferChapter(corePillar, `${item.title} ${item.summary} ${topics.join(' ')}`));
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE articles SET core_pillar = ?, japan_lens = ?, topic_layers = ?, affected_stack = ?,
+         priority_level = ?, recommended_action = ?, evidence = ?, why_it_matters = ?, signal_type = ?,
+         relevance_score = ?, actionability_score = ?, authority_score = ?, novelty_score = ?,
+         client_fit_score = ?, priority_score = ?, published_at_original = ?,
+         first_seen_at = CASE WHEN first_seen_at = '' THEN COALESCE(discovered_at, created_at) ELSE first_seen_at END,
+         last_seen_at = ?, source_updated_at = ?, crawl_run_at = ?, time_confidence = ?,
+         semantic_decision = ?, semantic_confidence = ?, semantic_model = ?, semantic_analyzed_at = ?,
+         rejection_reason = '', collection_stream = ?, chapter_id = ?
+       WHERE id = ?`
+    ).bind(
+      corePillar, intelligence.japanLens, JSON.stringify(topics), JSON.stringify(intelligence.affectedStack),
+      intelligence.priorityLevel, semantic?.recommendedActionJa || intelligence.recommendedAction,
+      semantic?.evidenceJa || intelligence.evidence, semantic?.whyItMattersJa ?? '',
+      semantic?.signalType ?? item.signalType,
+      semantic?.relevanceScore ?? intelligence.relevanceScore,
+      semantic?.actionabilityScore ?? intelligence.actionabilityScore,
+      intelligence.authorityScore, intelligence.noveltyScore,
+      semantic?.clientFitScore ?? intelligence.clientFitScore, intelligence.priorityScore,
+      item.publishedAt, seenAt, item.publishedAt, seenAt, intelligence.timeConfidence,
+      semantic?.decision ?? 'rules', semantic?.confidence ?? 1, semantic ? SEMANTIC_MODEL : '',
+      semantic ? seenAt : null, collectionStreamFor(source), chapterId, stored.id
+    ),
+    env.DB.prepare('DELETE FROM articles_fts WHERE article_id = ?').bind(stored.id),
+    env.DB.prepare(
+      'INSERT INTO articles_fts (article_id, title, summary, tags, search_tokens_ja) VALUES (?, ?, ?, ?, ?)'
+    ).bind(stored.id, item.title, item.summaryJa ?? item.summary, item.tags.join(' '), searchTokensJa),
+    candidateStatement(env, source, candidate, gate, semantic, 'published', stored.id)
+  ]);
+  return stored.id;
 }
 
 function enrichItem(source: SourceRecord, item: DiscoveredItem): DiscoveredItem {
@@ -1479,13 +1327,12 @@ function enrichItem(source: SourceRecord, item: DiscoveredItem): DiscoveredItem 
     pillar,
     subtopic,
     contentType: source.contentType,
-    summaryJa: makeSummaryJa(source, item, pillar, subtopic),
-    summaryZh: makeSummaryZh(source, item, pillar, subtopic)
+    summaryJa: makeSummaryJa(source, item, pillar, subtopic)
   };
 }
 
 type Intelligence = {
-  corePillar: Exclude<FdePillar, 'Japan'>;
+  corePillar: CorePillar;
   japanLens: string;
   topicLayers: string[];
   affectedStack: string[];
@@ -1503,11 +1350,7 @@ type Intelligence = {
 
 function inferIntelligence(source: SourceRecord, item: DiscoveredItem): Intelligence {
   const text = `${item.title} ${item.summary} ${item.tags.join(' ')} ${item.subtopic ?? ''}`;
-  const rawPillar = item.pillar ?? source.defaultPillar;
-  let corePillar: Intelligence['corePillar'] = rawPillar === 'Japan'
-    ? (GOVERN_PATTERN.test(text) ? 'Govern' : CUSTOMER_PATTERN.test(text) ? 'Customer' : 'Deploy')
-    : rawPillar;
-  if (!['Customer', 'Build', 'Deploy', 'Govern', 'Organization'].includes(corePillar)) corePillar = 'Customer';
+  const corePillar: CorePillar = item.pillar ?? inferPillar(source, text);
   const topicLayers = compactTags([
     /(identity|permission|auth|認証|権限)/i.test(text) ? 'Identity' : '',
     /(observab|monitor|telemetry|監視|可観測)/i.test(text) ? 'Observability' : '',
@@ -1547,7 +1390,7 @@ function inferIntelligence(source: SourceRecord, item: DiscoveredItem): Intellig
   else if (topicLayers.includes('Evaluation')) recommendedAction = '今週の評価計画に判定基準を追加する';
   else if (priorityLevel === 'P1') recommendedAction = '今週の検証候補に追加し、自社環境で成立条件を確かめる';
 
-  const relevanceScore = Math.min(100, item.fdeScore);
+  const relevanceScore = Math.min(100, item.fdeScore ?? 0);
   const actionabilityScore = priorityLevel === 'P0' ? 95 : priorityLevel === 'P1' ? 75 : 30;
   const authorityScore = Math.min(100, source.weight);
   const noveltyScore = ageDays <= 7 ? 95 : ageDays <= 30 ? 75 : 45;
@@ -1563,8 +1406,12 @@ function inferIntelligence(source: SourceRecord, item: DiscoveredItem): Intellig
       ? '公式情報の緊急性キーワードと公開時刻に基づく自動判定'
       : priorityLevel === 'P1' ? '本番導入・運用パターンとの一致に基づく自動判定' : '背景理解・中長期学習向けとして自動分類',
     relevanceScore, actionabilityScore, authorityScore, noveltyScore, clientFitScore, priorityScore,
-    timeConfidence: item.timeConfidence ?? (source.fetchMode === 'api' || source.fetchMode === 'rss' ? .9 : .55)
+    timeConfidence: itemTimeConfidence(source, item)
   };
+}
+
+function itemTimeConfidence(source: SourceRecord, item: { timeConfidence?: number }): number {
+  return item.timeConfidence ?? (source.fetchMode === 'api' || source.fetchMode === 'rss' ? .9 : .55);
 }
 
 function scoreFde100(source: SourceRecord, title: string, value: string): number {
@@ -1586,17 +1433,20 @@ function scoreFde100(source: SourceRecord, title: string, value: string): number
   return Math.min(100, score);
 }
 
-function inferPillar(source: SourceRecord, value: string): FdePillar {
-  if (source.country === 'JP') return 'Japan';
+/**
+ * One of the five pillars, from the item's text. Japan is a lens across all five (see README), never
+ * a pillar, so Japanese sources go through the same rules; their registry default 'Japan' falls back to Deploy.
+ */
+function inferPillar(source: SourceRecord, value: string): CorePillar {
   if (ORG_PATTERN.test(value) || source.kind === 'careers') return 'Organization';
   if (GOVERN_PATTERN.test(value)) return 'Govern';
   if (DEPLOY_PATTERN.test(value)) return 'Deploy';
   if (CUSTOMER_PATTERN.test(value)) return 'Customer';
   if (BUILD_PATTERN.test(value)) return 'Build';
-  return source.defaultPillar;
+  return source.defaultPillar === 'Japan' ? 'Deploy' : source.defaultPillar;
 }
 
-function inferSubtopic(pillar: FdePillar, value: string): string {
+function inferSubtopic(pillar: CorePillar, value: string): string {
   if (pillar === 'Customer') {
     if (/\broi\b|return on investment|効果|費用対効果/i.test(value)) return 'ROI';
     if (/business process|workflow|業務プロセス|業務/i.test(value)) return 'Business Process';
@@ -1626,132 +1476,36 @@ function inferSubtopic(pillar: FdePillar, value: string): string {
     if (/coe|center of excellence/i.test(value)) return 'AI CoE';
     if (/change management|transformation|変革/i.test(value)) return 'Change Management';
     if (/ai.native|AIネイティブ/i.test(value)) return 'AI-native';
-    return 'FDE Philosophy / Role';
   }
-  if (sourceTextIsGovernment(value)) return 'Government / Regulation';
-  if (/case stud|customer|導入事例|活用事例/i.test(value)) return 'Case Study';
-  if (GOVERN_PATTERN.test(value)) return 'Regulation / Security';
-  return 'Enterprise / Engineering';
+  return 'FDE Philosophy / Role';
 }
 
-function sourceTextIsGovernment(value: string): boolean {
-  return /(government|public sector|デジタル庁|経済産業省|総務省|行政|政府|IPA)/i.test(value);
-}
+const pillarNamesJa: Record<CorePillar, string> = {
+  Customer: '顧客課題', Build: '構築', Deploy: '本番導入', Govern: '統制・安全', Organization: '組織・定着'
+};
 
-function makeSummaryJa(source: SourceRecord, item: DiscoveredItem, pillar: FdePillar, subtopic: string): string {
+function makeSummaryJa(source: SourceRecord, item: DiscoveredItem, pillar: CorePillar, subtopic: string): string {
   if (/[ぁ-んァ-ヶ一-龠]/u.test(item.summary) && item.summary.length >= 40) return item.summary.slice(0, 320);
   const type = contentTypeLabel(source.contentType);
-  return `${source.name}が公開した${type}です。「${item.title}」を通じて、${pillar}領域の${subtopic}に関する変化を確認できます。`;
-}
-
-function makeSummaryZh(source: SourceRecord, item: DiscoveredItem, pillar: FdePillar, subtopic: string): string {
-  return `${source.name}发布的${contentTypeLabelZh(source.contentType)}，主题为“${item.title}”，涉及 FDE ${pillar} 环节的 ${subtopic}。`;
+  return `${source.name}が公開した${type}です。「${item.title}」を通じて、${pillarNamesJa[pillar]}領域の${subtopic}に関する変化を確認できます。`;
 }
 
 function contentTypeLabel(type: ContentType): string {
   return ({ news: 'ニュース', blog: '技術記事', video: '動画', paper: '論文', report: 'レポート', release: 'リリース情報', 'case-study': '導入事例', career: '採用情報' })[type];
 }
 
-function contentTypeLabelZh(type: ContentType): string {
-  return ({ news: '新闻', blog: '技术文章', video: '视频', paper: '论文', report: '报告', release: '更新说明', 'case-study': '落地案例', career: '招聘信息' })[type];
-}
 
-function scoreFde(value: string, career: boolean): number {
-  let score = 0;
-  if (ROLE_PATTERN.test(value)) score += career ? 6 : 5;
-  if (AI_PATTERN.test(value)) score += 1;
-  if (FIELD_PATTERN.test(value)) score += 1;
-  if (DELIVERY_PATTERN.test(value)) score += 2;
-  if (QUALITY_PATTERN.test(value)) score += 1;
-  if (/^how .+ (uses|builds|deploys|adopts)/i.test(value)) score += 3;
-  return Math.min(10, score);
-}
 
-function passesCommunityGate(title: string, haystack: string): boolean {
-  if (ROLE_PATTERN.test(title) || /\bFDE\b/i.test(title)) return true;
-  return AI_PATTERN.test(title)
-    && FIELD_PATTERN.test(haystack)
-    && (DELIVERY_PATTERN.test(haystack) || QUALITY_PATTERN.test(haystack));
-}
 
-function inferSignalType(value: string): string {
-  if (ROLE_PATTERN.test(value)) return '採用・役割';
-  if (QUALITY_PATTERN.test(value) && /(security|governance|safety|guardrail|安全|ガバナンス)/i.test(value)) return '安全・ガバナンス';
-  if (QUALITY_PATTERN.test(value)) return '評価・品質';
-  if (/(production|rollout|operation|observability|本番|運用)/i.test(value)) return '本番化・運用';
-  return '導入事例';
-}
 
-function inferRegion(value: string): 'JP' | 'APAC' | 'GLOBAL' {
-  if (/(tokyo|japan|japanese|日本|東京|大阪)/i.test(value)) return 'JP';
-  if (/(singapore|seoul|korea|sydney|australia|india|apac|asia|シンガポール|韓国|アジア)/i.test(value)) return 'APAC';
-  return 'GLOBAL';
-}
 
-function inferLocation(value: string): string {
-  const matches = value.match(/(Tokyo, Japan|Japan|Singapore|Seoul, South Korea|Sydney, Australia|London, UK|San Francisco, CA|New York(?: City)?, NY|Washington, DC)/i);
-  return matches?.[0] ?? '';
-}
 
-function inferSector(value: string): string {
-  if (/(government|public sector|defen[cs]e)/i.test(value)) return '公共・行政';
-  if (/(health|medical|life science)/i.test(value)) return '医療・ライフサイエンス';
-  if (/(financial|bank|insurance|fintech)/i.test(value)) return '金融';
-  if (/(manufactur|industrial|semiconductor)/i.test(value)) return '製造';
-  if (/(retail|commerce)/i.test(value)) return '小売・流通';
-  return '業界横断';
-}
 
-function extractKeywords(value: string): string[] {
-  const candidates = ['FDE', 'Applied AI', 'AI deployment', 'evaluation', 'production', 'security', 'governance', 'agents'];
-  return candidates.filter((candidate) => new RegExp(candidate.replace('FDE', 'forward deployed|FDE'), 'i').test(value));
-}
 
-function inferImpactTags(source: SourceRecord, item: DiscoveredItem): {
-  relevance: string[];
-  business: string[];
-  engineering: string[];
-} {
-  const pillar = item.pillar ?? source.defaultPillar;
-  const value = `${item.title} ${item.summary} ${item.tags.join(' ')} ${item.subtopic ?? ''}`;
-  const relevanceByPillar: Record<FdePillar, string> = {
-    Customer: '顧客課題',
-    Build: '実装手法',
-    Deploy: '本番導入',
-    Govern: 'リスク管理',
-    Organization: '組織・人材',
-    Japan: '日本市場'
-  };
-  const business: string[] = [];
-  const engineering: string[] = [];
-  const add = (target: string[], label: string, pattern: RegExp) => {
-    if (pattern.test(value) && !target.includes(label)) target.push(label);
-  };
-
-  add(business, 'コスト・ROI', /\broi\b|return on investment|cost|cost-saving|費用|コスト|投資対効果/i);
-  add(business, '業務効率', /workflow|automation|productivity|efficien|業務|自動化|生産性|効率/i);
-  add(business, '顧客体験・売上', /customer experience|revenue|sales|conversion|顧客体験|売上|販売/i);
-  add(business, 'リスク低減', /risk|security|privacy|safety|guardrail|リスク|セキュリティ|安全|プライバシー/i);
-  add(business, '規制対応', /regulat|compliance|policy|law|governance|規制|法令|コンプライアンス|ガバナンス/i);
-  add(business, '組織・人材', /career|hiring|talent|organization|change management|採用|人材|組織|教育/i);
-  add(business, '導入判断', /deploy|production|adoption|implementation|導入|本番|実装/i);
-
-  add(engineering, 'RAG・検索', /\brag\b|retrieval|enterprise search|検索/i);
-  add(engineering, 'AIエージェント', /\bagent(?:ic|s)?\b|エージェント/i);
-  add(engineering, '評価・品質', /evaluation|evals?|benchmark|quality|testing|評価|品質|テスト/i);
-  add(engineering, 'セキュリティ', /security|prompt injection|guardrail|attack|セキュリティ|攻撃/i);
-  add(engineering, '本番基盤', /deploy|production|cloud|infrastructure|本番|クラウド|基盤/i);
-  add(engineering, '監視・運用', /observability|monitor|operation|incident|監視|運用|障害/i);
-  add(engineering, '認証・権限', /identity|auth|permission|access control|認証|権限|アクセス制御/i);
-  add(engineering, 'システム連携', /integration|connector|\bmcp\b|api|連携|コネクタ/i);
-  add(engineering, 'データ基盤', /database|data platform|data pipeline|データベース|データ基盤/i);
-  add(engineering, '開発支援', /coding|software engineering|developer|コード|開発/i);
-
-  return {
-    relevance: [relevanceByPillar[pillar], item.subtopic].filter((label): label is string => Boolean(label)).slice(0, 2),
-    business: business.slice(0, 3),
-    engineering: engineering.slice(0, 3)
-  };
+/** Relevance tags shown on 二面 (「影響」): the pillar's reader-facing name and the subtopic. */
+function inferRelevanceTags(source: SourceRecord, item: DiscoveredItem): string[] {
+  const pillar = item.pillar ?? inferPillar(source, item.title);
+  return [pillarNamesJa[pillar], item.subtopic].filter((label): label is string => Boolean(label)).slice(0, 2);
 }
 
 async function persistArchive(env: Env, source: SourceRecord, items: DiscoveredItem[], mode: SourceRecord['fetchMode'], fetchedAt: string): Promise<void> {
@@ -1777,7 +1531,11 @@ async function markSourceSuccess(env: Env, source: SourceRecord, meta: FetchMeta
   await env.DB.prepare(
     `UPDATE sources SET etag = ?, last_modified = ?, last_success_at = ?, consecutive_failures = 0,
      last_error_at = NULL, backoff_until = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-  ).bind(meta.etag ?? source.etag ?? null, meta.lastModified ?? source.lastModified ?? null, new Date().toISOString(), source.id).run();
+  ).bind(
+    meta.primary ? meta.etag ?? source.etag ?? null : source.etag ?? null,
+    meta.primary ? meta.lastModified ?? source.lastModified ?? null : source.lastModified ?? null,
+    new Date().toISOString(), source.id
+  ).run();
 }
 
 async function markSourceFailure(env: Env, source: SourceRecord, failure: FetchFailure): Promise<void> {
@@ -1799,7 +1557,6 @@ async function dispatchSources(env: Env): Promise<void> {
   const sources = await readSources(env);
   if (!sources.length) return;
   await env.INGEST_QUEUE.sendBatch(sources.map((source) => ({ body: { sourceIds: [source.id], reason: 'scheduled' as const } })));
-  await env.CACHE.put('ingest:last-dispatch', new Date().toISOString(), { expirationTtl: 172800 });
 }
 
 function isAuthorized(request: Request, env: Env): boolean {
@@ -1858,43 +1615,28 @@ function setSessionCookie(c: Parameters<typeof setCookie>[0], token: string): vo
 async function readSession(env: Env, token?: string): Promise<SessionIdentity | null> {
   if (!token) return null;
   const session = await env.DB.prepare(
-    `SELECT s.id AS session_id, u.id AS user_id, u.display_name, u.role
+    `SELECT s.id AS session_id, u.id AS user_id, u.display_name, u.role,
+            julianday(s.last_seen_at) < julianday('now', '-1 hour') AS stale
      FROM user_sessions s JOIN users u ON u.id = s.user_id
      WHERE s.token_hash = ? AND julianday(s.expires_at) > julianday('now')`
-  ).bind(await sha256(token)).first<{ session_id: string; user_id: string; display_name: string; role: string }>();
+  ).bind(await sha256(token)).first<{ session_id: string; user_id: string; display_name: string; role: string; stale: number }>();
   if (!session) return null;
-  await env.DB.prepare('UPDATE user_sessions SET last_seen_at = CURRENT_TIMESTAMP WHERE id = ?').bind(session.session_id).run();
+  // last_seen_at only feeds the session list, so an hour of precision is enough; ordinary
+  // authenticated requests then read D1 without also writing to it.
+  if (session.stale) await env.DB.prepare('UPDATE user_sessions SET last_seen_at = CURRENT_TIMESTAMP WHERE id = ?').bind(session.session_id).run();
   return { sessionId: session.session_id, userId: session.user_id, displayName: session.display_name, isAdmin: session.role === 'admin' };
 }
 
 function normalizeBackfillSince(value?: string): string | undefined {
-  const raw = value?.trim() || '2026-06-01';
+  const raw = value?.trim() || PUBLIC_BASELINE.slice(0, 10);
   const timestamp = Date.parse(`${raw.slice(0, 10)}T00:00:00+09:00`);
-  const minimum = Date.parse('2026-06-01T00:00:00+09:00');
+  const minimum = Date.parse(PUBLIC_BASELINE);
   if (!Number.isFinite(timestamp) || timestamp < minimum || timestamp > Date.now()) return undefined;
   return new Date(timestamp).toISOString();
 }
 
-function readFeedLink(rawLink: unknown, baseUrl: string): string | undefined {
-  for (const link of Array.isArray(rawLink) ? rawLink : [rawLink]) {
-    const value = typeof link === 'string' ? link : (link as Record<string, unknown> | undefined)?.['@_href'] ?? (link as Record<string, unknown> | undefined)?.href;
-    if (!value) continue;
-    try { return new URL(String(value), baseUrl).toString(); } catch { /* malformed item */ }
-  }
-  return undefined;
-}
 
-function extractFeedTags(raw: unknown): string[] {
-  return (Array.isArray(raw) ? raw : raw ? [raw] : []).slice(0, 8).map((tag) => {
-    if (typeof tag === 'string') return cleanText(tag);
-    const value = tag as Record<string, unknown>;
-    return cleanText(String(value?.['#text'] ?? value?.['@_term'] ?? value?.name ?? ''));
-  }).filter(Boolean);
-}
 
-function compactTags(tags: string[]): string[] {
-  return [...new Set(tags.map(cleanText).filter(Boolean))].slice(0, 10);
-}
 
 function parseRetryAfter(value: string | null): number | undefined {
   if (!value) return undefined;
@@ -1904,26 +1646,8 @@ function parseRetryAfter(value: string | null): number | undefined {
   return Number.isFinite(timestamp) ? Math.min(86_400, Math.max(60, Math.ceil((timestamp - Date.now()) / 1000))) : undefined;
 }
 
-function safeIsoDate(value: string): string {
-  const timestamp = Date.parse(value);
-  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : new Date().toISOString();
-}
 
-function dateFromTitle(value: string): string | undefined {
-  const match = value.match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+20\d{2}\b/i);
-  if (!match) return undefined;
-  const timestamp = Date.parse(match[0]);
-  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : undefined;
-}
 
-function cleanText(value: string): string {
-  return value
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&(?:amp;)?lt;/g, '<').replace(/&(?:amp;)?gt;/g, '>')
-    .replace(/&(?:amp;)?quot;/g, '"').replace(/&#0?39;|&apos;/g, "'")
-    .replace(/&amp;/g, '&').replace(/&nbsp;/g, ' ')
-    .replace(/\s+/g, ' ').trim();
-}
 
 function normalizeUrl(value: string): string | undefined {
   try {
@@ -1980,16 +1704,20 @@ const worker = {
       const permanentFailures: string[] = [];
       const deferredFailures: string[] = [];
       for (const source of sources) {
+        // consecutive_failures only moves once per run, so this is the number of failed runs.
+        const runs = (source.consecutiveFailures ?? 0) + 1;
         try {
-          await ingestSource(env, source, { mode, since: message.body.since, page: message.body.page });
+          await ingestSource(env, source, {
+            mode, since: message.body.since, page: message.body.page,
+            willRetry: (failure) => willRetryInQueue(ingestFailureKind(source, failure, runs), message.attempts, QUEUE_MAX_RETRIES)
+          });
         }
         catch (error) {
-          const message = `${source.id}: ${errorMessage(error)}`;
-          const attempts = (source.consecutiveFailures ?? 0) + 1;
-          if (isPermanentFetchFailure(error as FetchFailure, attempts)) permanentFailures.push(message);
-          else if (isDeferredYoutubeFeedFailure(source, error as FetchFailure)
-            || (error as FetchFailure).status === 429) deferredFailures.push(message);
-          else retryableFailures.push(message);
+          const detail = `${source.id}: ${errorMessage(error)}`;
+          const kind = ingestFailureKind(source, error as FetchFailure, runs);
+          if (kind === 'permanent') permanentFailures.push(detail);
+          else if (kind === 'deferred') deferredFailures.push(detail);
+          else retryableFailures.push(detail);
         }
       }
       if (permanentFailures.length) console.error({

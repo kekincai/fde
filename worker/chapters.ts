@@ -47,7 +47,8 @@ export function inferChapter(pillar: Exclude<FdePillar, 'Japan'>, value: string)
   const text = value.normalize('NFKC').toLowerCase();
   // Strong operational concepts take precedence over a broad model-assigned
   // pillar. This keeps identity and observability articles from disappearing
-  // into a generic governance bucket.
+  // into a generic governance bucket. The per-pillar rules below only cover
+  // what these cross-pillar checks have not already decided.
   if (/privacy|personal data|個人情報|プライバシー/.test(text)) return 'govern.privacy';
   if (/on.?prem|private cloud|closed network|air.?gapped|閉域|オンプレ/.test(text)) return 'deploy.on-prem';
   if (/observab|monitoring|telemetry|可観測|監視/.test(text)) return 'deploy.observability';
@@ -63,28 +64,22 @@ export function inferChapter(pillar: Exclude<FdePillar, 'Japan'>, value: string)
   }
   if (pillar === 'Build') {
     if (/\brag\b|retrieval|enterprise search|検索|ナレッジ/.test(text)) return 'build.rag';
-    if (/connector|integration|\bmcp\b|連携|統合|コネクタ/.test(text)) return 'build.integration';
-    if (/legacy|modernization|migration|レガシー|刷新|移行/.test(text)) return 'build.legacy';
     return 'build.agent';
   }
   if (pillar === 'Deploy') {
-    if (/identity|permission|authentication|authorization|\biam\b|認証|権限/.test(text)) return 'deploy.identity';
     if (/observab|monitor|trace|telemetry|監視|可観測/.test(text)) return 'deploy.observability';
     if (/cost|token efficiency|budget|費用|コスト|予算/.test(text)) return 'deploy.cost';
-    if (/on.?prem|private cloud|closed network|閉域|オンプレ/.test(text)) return 'deploy.on-prem';
     if (/data platform|database|data boundary|データ|データベース/.test(text)) return 'deploy.data';
     return 'deploy.cloud';
   }
   if (pillar === 'Govern') {
     if (/eval|evaluation|benchmark|評価|テスト/.test(text)) return 'govern.evaluation';
-    if (/privacy|personal data|個人情報|プライバシー/.test(text)) return 'govern.privacy';
     if (/regulat|policy|law|procurement|規制|法令|政策|調達|ガイドライン/.test(text)) return 'govern.regulation';
     if (/reliab|resilien|incident|fallback|信頼性|障害|復旧/.test(text)) return 'govern.reliability';
     return 'govern.security';
   }
-  if (/\bcoe\b|center of excellence|推進組織|横断組織/.test(text)) return 'organization.coe';
   if (/change management|adoption|literacy|training|定着|研修|リテラシー|変革/.test(text)) return 'organization.change';
   if (/career|hiring|job|talent|採用|求人|人材/.test(text)) return 'organization.talent';
-  if (/ai.native|ai-first|ai first|AIネイティブ|aiネイティブ/.test(value)) return 'organization.ai-native';
+  if (/ai.native|ai-first|ai first|aiネイティブ/.test(text)) return 'organization.ai-native';
   return 'organization.fde';
 }

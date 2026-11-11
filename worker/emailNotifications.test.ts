@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import { jstDayWindow, renderConfigurationTest, renderDailyDigest, renderFailureEmail, sourceIssue, type SourceHealth } from './emailNotifications.ts';
+import { DAILY_DIGEST_CRON, digestWindow, INGEST_DISPATCH_CRON, INGEST_HEALTH_CRON, renderConfigurationTest, renderDailyDigest, renderFailureEmail, sourceIssue, type SourceHealth } from './emailNotifications.ts';
 
 const healthySource: SourceHealth = {
   id: 'source-1', name: '公式 <Source>', homepage: 'https://example.com/?a=1&b=2',
@@ -9,10 +10,16 @@ const healthySource: SourceHealth = {
   last_error_at: null, consecutive_failures: 0, backoff_until: null, created_at: '2026-08-01T00:00:00.000Z'
 };
 
-test('JST の日付境界を UTC に変換する', () => {
-  assert.deepEqual(jstDayWindow(new Date('2026-08-24T09:30:00.000Z')), {
-    day: '2026-08-24', start: '2026-08-23T15:00:00.000Z', end: '2026-08-24T09:30:00.000Z'
+test('日報の窓は直前24時間で、日付は JST', () => {
+  assert.deepEqual(digestWindow(new Date('2026-08-24T09:30:00.000Z')), {
+    day: '2026-08-24', start: '2026-08-23T09:30:00.000Z', end: '2026-08-24T09:30:00.000Z'
   });
+});
+
+test('連続する日報の窓は隙間なくつながる', () => {
+  const yesterday = digestWindow(new Date('2026-08-23T09:30:00.000Z'));
+  const today = digestWindow(new Date('2026-08-24T09:30:00.000Z'));
+  assert.equal(today.start, yesterday.end);
 });
 
 test('3回連続失敗を異常と判定する', () => {
@@ -62,4 +69,10 @@ test('日報は優先度・要約・取得健康度を含む', () => {
   assert.match(email.html, /現場導入の要点/);
   assert.match(email.html, /background:#edf3ff/);
   assert.match(email.text, /AI導入の実務/);
+});
+
+test('the cron strings the scheduled handler dispatches on are the ones wrangler.toml schedules', () => {
+  const toml = readFileSync(new URL('../wrangler.toml', import.meta.url), 'utf8');
+  const crons = JSON.parse(toml.match(/^crons\s*=\s*(\[.*\])$/m)?.[1] ?? '[]') as string[];
+  assert.deepEqual([...crons].sort(), [DAILY_DIGEST_CRON, INGEST_DISPATCH_CRON, INGEST_HEALTH_CRON].sort());
 });

@@ -1,17 +1,28 @@
+import { SITE_URL } from '../src/data/site';
+
 type NotificationEnv = {
   DB: D1Database;
   CACHE: KVNamespace;
   RESEND_API_KEY?: string;
   RESEND_TO?: string;
+  /** A sender on a domain verified in Resend. The default sandbox sender can only mail the account owner. */
+  RESEND_FROM?: string;
 };
 
+// The scheduled handler dispatches on these exact strings; emailNotifications.test.ts checks that
+// they match the crons in wrangler.toml.
 export const INGEST_DISPATCH_CRON = '0 */6 * * *';
 export const INGEST_HEALTH_CRON = '*/30 * * * *';
 export const DAILY_DIGEST_CRON = '30 9 * * *';
 
-const SITE_URL = 'https://fde.kejincai.dev';
 const RESEND_ENDPOINT = 'https://api.resend.com/emails';
-const RESEND_FROM = 'FDE Radar <onboarding@resend.dev>';
+const RESEND_SANDBOX_FROM = 'FDE Radar <onboarding@resend.dev>';
+
+/**
+ * When an article first appeared. Written exactly like the expression index in migration 0025,
+ * so the digest's range scan can use it.
+ */
+const FIRST_SEEN = "datetime(COALESCE(NULLIF(first_seen_at, ''), discovered_at, created_at))";
 const FAILURE_COOLDOWN_SECONDS = 6 * 60 * 60;
 const DAY_SECONDS = 24 * 60 * 60;
 
@@ -54,14 +65,15 @@ type RunSummary = {
 
 type ResendResult = { id?: string; message?: string; name?: string };
 
-export function jstDayWindow(now: Date): { day: string; start: string; end: string } {
+// 日報は毎日同じ時刻に送るため、直前24時間を窓にすると取りこぼしも重複もなく日々の窓が連続する。
+// day は件名と送信済みキーに使う JST の日付。
+export function digestWindow(now: Date): { day: string; start: string; end: string } {
   const formatter = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit'
   });
-  const day = formatter.format(now);
   return {
-    day,
-    start: new Date(`${day}T00:00:00+09:00`).toISOString(),
+    day: formatter.format(now),
+    start: new Date(now.getTime() - DAY_SECONDS * 1000).toISOString(),
     end: now.toISOString()
   };
 }
@@ -195,10 +207,10 @@ export function renderDailyDigest(
       <p style="font-size:14px;line-height:1.8;margin:0;color:#4e5d75">${escapeHtml(summary)}</p>
       ${action ? `<div style="font-size:13px;line-height:1.7;margin:12px 0 0;padding:10px 12px;border-left:3px solid #2059dc;background:#edf3ff;color:#314663"><b style="color:#2059dc">次の一手</b>&nbsp;&nbsp;${escapeHtml(action)}</div>` : ''}
     </div>`;
-  }).join('') : '<div style="padding:18px 0;border-top:1px solid #d8e0eb;font-size:14px;line-height:1.8;color:#627089">本日の新着記事はありません。収集処理と Source の健康状態は継続して監視しています。</div>';
+  }).join('') : '<div style="padding:18px 0;border-top:1px solid #d8e0eb;font-size:14px;line-height:1.8;color:#627089">直近24時間の新着記事はありません。収集処理と Source の健康状態は継続して監視しています。</div>';
   const html = emailFrame(
     `${day} のフィールドインテリジェンス`,
-    '今日追加された FDE 関連情報を、優先度と実務への接続点が分かる形でまとめました。',
+    '直近24時間に追加された FDE 関連情報を、優先度と実務への接続点が分かる形でまとめました。',
     `${metrics}${articleHtml}${totalArticles > articles.length ? `<p style="margin:18px 0 0;padding-top:16px;border-top:1px solid #d8e0eb;font-size:13px;color:#627089">ほか ${totalArticles - articles.length} 件はサイトで確認できます。</p>` : ''}`
   );
   const text = [
@@ -209,7 +221,7 @@ export function renderDailyDigest(
       `${index + 1}. [${article.priority_level} / ${article.core_pillar}] ${article.title}`,
       `   ${concise(article.summary_ja || article.summary || article.why_it_matters || '')}`,
       `   ${article.canonical_url}`
-    ]) : ['本日の新着記事はありません。']),
+    ]) : ['直近24時間の新着記事はありません。']),
     '', SITE_URL
   ].join('\n');
   return { subject, html, text };
@@ -228,7 +240,7 @@ async function sendEmail(
       'Content-Type': 'application/json',
       'Idempotency-Key': idempotencyKey.slice(0, 256)
     },
-    body: JSON.stringify({ from: RESEND_FROM, to: [env.RESEND_TO], ...message })
+    body: JSON.stringify({ from: env.RESEND_FROM || RESEND_SANDBOX_FROM, to: [env.RESEND_TO], ...message })
   });
   const result = await response.json().catch(() => ({})) as ResendResult;
   if (!response.ok) throw new Error(`Resend ${response.status}: ${result.message ?? result.name ?? 'send failed'}`);
@@ -260,26 +272,24 @@ export async function monitorIngestionHealth(env: NotificationEnv, now = new Dat
 }
 
 export async function sendDailyDigest(env: NotificationEnv, now = new Date(), force = false): Promise<{ sent: boolean; articles: number }> {
-  const window = jstDayWindow(now);
+  const window = digestWindow(now);
   const sentKey = `email:daily:${window.day}`;
   if (!force && await env.CACHE.get(sentKey)) return { sent: false, articles: 0 };
+  // Same visibility as the paper (status and score), over articles first seen in the window.
+  // The unary + keeps SQLite from picking the status index over the far more selective time range.
+  const recent = `SELECT id FROM articles
+     WHERE ${FIRST_SEEN} >= datetime(?) AND ${FIRST_SEEN} < datetime(?)
+       AND +status = 'published' AND +fde_score >= 40`;
   const [articleRows, articleCount, runRow, sources] = await Promise.all([
     env.DB.prepare(
       `SELECT a.title, a.canonical_url, s.name AS source_name, a.core_pillar, a.priority_level,
               a.summary_ja, a.summary, a.why_it_matters, a.recommended_action, a.published_at
        FROM articles a JOIN sources s ON s.id = a.source_id
-       WHERE a.status = 'published'
-         AND datetime(COALESCE(NULLIF(a.first_seen_at, ''), a.discovered_at, a.created_at)) >= datetime(?)
-         AND datetime(COALESCE(NULLIF(a.first_seen_at, ''), a.discovered_at, a.created_at)) < datetime(?)
+       WHERE a.id IN (${recent})
        ORDER BY CASE a.priority_level WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 ELSE 2 END,
                 a.priority_score DESC, a.published_at DESC LIMIT 30`
     ).bind(window.start, window.end).all<DailyArticle>(),
-    env.DB.prepare(
-      `SELECT COUNT(*) AS total FROM articles
-       WHERE status = 'published'
-         AND datetime(COALESCE(NULLIF(first_seen_at, ''), discovered_at, created_at)) >= datetime(?)
-         AND datetime(COALESCE(NULLIF(first_seen_at, ''), discovered_at, created_at)) < datetime(?)`
-    ).bind(window.start, window.end).first<{ total: number }>(),
+    env.DB.prepare(`SELECT COUNT(*) AS total FROM (${recent})`).bind(window.start, window.end).first<{ total: number }>(),
     env.DB.prepare(
       `SELECT COUNT(*) AS runs,
               SUM(CASE WHEN status IN ('success', 'not_modified') THEN 1 ELSE 0 END) AS successful_runs,

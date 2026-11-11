@@ -38,6 +38,27 @@ export function youtubeFeedRetryUrl(rawUrl: string, nonce = Date.now()): string 
   return url.toString();
 }
 
+/** `max_retries` of the queue consumer in wrangler.toml (fetchPolicy.test.ts keeps them in step). */
+export const QUEUE_MAX_RETRIES = 3;
+
+export type IngestFailureKind = 'permanent' | 'deferred' | 'retryable';
+
+/** `runs` counts collection runs that failed in a row, including this one (not Queue attempts). */
+export function ingestFailureKind(source: FetchSourceLike, failure: FetchFailureLike, runs: number): IngestFailureKind {
+  if (isPermanentFetchFailure(failure, runs)) return 'permanent';
+  if (isDeferredYoutubeFeedFailure(source, failure) || failure.status === 429) return 'deferred';
+  return 'retryable';
+}
+
+/**
+ * Whether the Queue will deliver this message again. Only the last delivery of a run records the
+ * failure, so one outage costs one step of consecutive_failures, not one per retry.
+ * `attempt` is the 1-based Message.attempts; `maxRetries` mirrors wrangler.toml.
+ */
+export function willRetryInQueue(kind: IngestFailureKind, attempt: number, maxRetries: number): boolean {
+  return kind === 'retryable' && attempt <= maxRetries;
+}
+
 export function sourceBackoffSeconds(failure: FetchFailureLike, attempts: number, minimumSeconds = 60): number {
   if (isPermanentFetchFailure(failure, attempts)) return 7 * 86_400;
   if (failure.retryAfterSeconds !== undefined) return Math.max(minimumSeconds, failure.retryAfterSeconds);

@@ -1,4 +1,8 @@
 import type { SourceRecord } from './sourceRegistry';
+import { AI_PATTERN, BUILD_PATTERN, DELIVERY_PATTERN, matchesIncludeTerms, ROLE_PATTERN } from './vocabulary';
+
+/** Workers AI model used for the semantic review. */
+export const SEMANTIC_MODEL = '@cf/meta/llama-3.1-8b-instruct-fast';
 
 export type CandidateText = {
   title: string;
@@ -28,19 +32,33 @@ export type SemanticDecision = {
   rejectionReason: string;
 };
 
-const AI = /\b(ai|artificial intelligence|llm|large language model|generative ai|genai|agentic|gpt|chatgpt|codex|claude|gemini|bedrock|copilot|aip|workers ai|mcp)\b|生成AI|人工知能|大規模言語モデル/i;
-const FDE_ROLE = /forward deployed|\bfde\b|fdse|deployment strategist|フォワード.?デプロイド|AI導入エンジニア/i;
+// Gate-specific contexts. AI, role, delivery and build terms come from vocabulary.ts.
 const CUSTOMER = /customer|client|enterprise|public sector|case stud|use case|roi|business process|顧客|企業|行政|導入事例|活用事例|業務|効果/i;
-const DELIVERY = /deploy|production|rollout|adoption|implementation|integration|workflow|migration|legacy|本番|導入|実装|運用|連携|移行|定着/i;
 const CONTROL = /security|governance|privacy|personal data|identity|permission|evaluation|evals|observability|reliability|guardrail|安全|ガバナンス|ガイドライン|指針|規制|プライバシー|個人情報|注意喚起|認証|権限|評価|監視|品質/i;
-const BUILD = /agent|rag|retrieval|connector|mcp|tool use|coding agent|codex|エージェント|検索|コネクタ|ツール利用/i;
 const GENERIC_NOISE = /giveaway|coupon|wallpaper|horoscope|sports score|celebrity|ゲーム攻略|プレゼント|占い|芸能|株価だけ/i;
+
+/** The public archive starts on 2026-06-01 (JST). Older items are kept out of the paper (see migration 0021). */
+export const PUBLIC_BASELINE = '2026-06-01T00:00:00+09:00';
+
+/** True only for a readable date before the baseline; an unreadable date is not grounds to drop an item. */
+export function isBeforePublicBaseline(publishedAt: string): boolean {
+  const timestamp = Date.parse(publishedAt);
+  return Number.isFinite(timestamp) && timestamp < Date.parse(PUBLIC_BASELINE);
+}
 
 export const SEMANTIC_REVIEW_POLICY = 'あなたは FDE Radar の編集判定器です。FDE は顧客チームと並走し、課題発見、技術要件の定義、システム設計、実装、評価、本番導入、利用定着、現場から製品・モデルへのフィードバックまでを端から端まで担う実践です。一般的なAIニュース、モデル性能だけの話、AIと無関係な行政情報は reject。顧客課題、企業導入、統合、本番運用、ID・権限、評価、監視、セキュリティ、組織定着、FDEの役割に具体的な意味があるものだけ publish。曖昧なら review。説明は日本語で短く、記事にない事実を作らないでください。';
 
 function bounded(value: unknown, fallback = 0): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? Math.max(0, Math.min(100, parsed)) : fallback;
+}
+
+// モデルは 0–1 と 0–100 のどちらでも返しうる。読めない値は公開閾値（0.62）を通さない 0.5 に倒す。
+export function semanticConfidence(value: unknown): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 0.5;
+  const ratio = parsed > 1 ? parsed / 100 : parsed;
+  return Math.max(0, Math.min(1, ratio));
 }
 
 function score100(value: unknown, fallback: number): number {
@@ -59,16 +77,16 @@ export function evaluateCandidate(source: SourceRecord, item: CandidateText): Ga
   if (source.excludeTerms?.some((term) => text.toLowerCase().includes(term.toLowerCase()))) {
     return { decision: 'reject', score: 0, reasons: ['source-exclusion'] };
   }
-  if (source.includeTerms?.length && !source.includeTerms.some((term) => text.toLowerCase().includes(term.toLowerCase()))) {
+  if (!matchesIncludeTerms(text, source.includeTerms)) {
     return { decision: 'reject', score: 5, reasons: ['outside-source-scope'] };
   }
 
-  const hasRole = FDE_ROLE.test(text);
-  const hasAi = AI.test(text) || hasRole;
+  const hasRole = ROLE_PATTERN.test(text);
+  const hasAi = AI_PATTERN.test(text) || hasRole;
   const hasCustomer = CUSTOMER.test(text);
-  const hasDelivery = DELIVERY.test(text);
+  const hasDelivery = DELIVERY_PATTERN.test(text);
   const hasControl = CONTROL.test(text);
-  const hasBuild = BUILD.test(text);
+  const hasBuild = BUILD_PATTERN.test(text);
   if (!hasAi) return { decision: 'reject', score: 0, reasons: ['not-ai'] };
   if (hasRole) reasons.push('fde-role');
   if (hasCustomer) reasons.push('customer-context');
@@ -112,7 +130,7 @@ export async function reviewWithWorkersAI(ai: Ai, source: SourceRecord, item: Ca
   };
   const prompt = `${SEMANTIC_REVIEW_POLICY}\n\n情報源: ${source.name}\n分類ストリーム: ${source.stream ?? 'production-pattern'}\nタイトル: ${item.title}\n概要: ${item.summary.slice(0, 3500)}\nタグ: ${item.tags.join(', ')}\nURL: ${item.url}`;
   const runner = ai as unknown as { run(model: string, input: Record<string, unknown>): Promise<unknown> };
-  const output = await runner.run('@cf/meta/llama-3.1-8b-instruct-fast', {
+  const output = await runner.run(SEMANTIC_MODEL, {
     messages: [{ role: 'system', content: 'Return only data matching the JSON schema.' }, { role: 'user', content: prompt }],
     response_format: { type: 'json_schema', json_schema: schema },
     temperature: 0,
@@ -126,7 +144,7 @@ export async function reviewWithWorkersAI(ai: Ai, source: SourceRecord, item: Ca
     ? value.corePillar as SemanticDecision['corePillar'] : 'Deploy';
   return {
     decision,
-    confidence: bounded(value.confidence, 50) / (Number(value.confidence) > 1 ? 100 : 1),
+    confidence: semanticConfidence(value.confidence),
     corePillar: pillar,
     topics: Array.isArray(value.topics) ? value.topics.map((topic) => shortText(topic, 40)).filter(Boolean).slice(0, 5) : [],
     signalType: shortText(value.signalType, 50) || 'AI導入・運用',
