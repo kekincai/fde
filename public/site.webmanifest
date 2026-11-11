@@ -1,13 +1,14 @@
 {
   "name": "ＦＤＥレーダー",
   "short_name": "ＦＤＥレーダー",
-  "description": "AI導入の一次情報を収集・分類する日本語サイト",
+  "description": "AI導入に関する公式発表・導入事例・制度・求人などの一次情報を六時間ごとに収集し、FDEの観点と優先度で分類して並べる日本語サイト",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#FFFFFF",
   "theme_color": "#FFFFFF",
   "icons": [
     { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
-    { "src": "/ai-fde-mark-512.png", "sizes": "512x512", "type": "image/png" }
+    { "src": "/ai-fde-mark-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
   ]
 }

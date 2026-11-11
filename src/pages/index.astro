@@ -1,6 +1,14 @@
 ---
 import RadarApp from '../components/RadarApp';
+import { SITE_NAME, SITE_URL } from '../data/site';
 import '../styles/app.css';
+
+const title = `${SITE_NAME} — AI導入の一次情報を集約`;
+const description = `${SITE_NAME}は、AI導入に関する公式発表・導入事例・制度・求人などの一次情報を六時間ごとに収集し、FDEの観点と優先度で分類して並べる日本語サイトです。`;
+const image = `${SITE_URL}/ai-fde-mark-512.png`;
+// Text-heavy fonts load without blocking the first paint; the masthead face is subset to the six glyphs it draws.
+const textFonts = 'https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=Noto+Serif+JP:wght@500;700;900&display=swap';
+const mastheadFont = `https://fonts.googleapis.com/css2?family=Yuji+Syuku&display=swap&text=${encodeURIComponent(SITE_NAME)}`;
 ---
 
 <!doctype html>
@@ -8,10 +16,16 @@ import '../styles/app.css';
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="description" content="FDE RADARは、AI導入に関する公式発表・導入事例・制度・求人などの一次情報を収集し、FDEの観点と優先度で分類して並べる日本語サイトです。" />
-    <meta property="og:title" content="FDE RADAR — AI導入の一次情報を集約" />
-    <meta property="og:description" content="日本とグローバルのAI導入に関する一次情報を、6時間ごとに収集・分類。" />
-    <meta property="og:image" content="/ai-fde-mark-512.png" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={`${SITE_URL}/`} />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content={SITE_NAME} />
+    <meta property="og:url" content={`${SITE_URL}/`} />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:image" content={image} />
+    <meta name="twitter:card" content="summary" />
     <meta name="theme-color" content="#FFFFFF" />
     <meta name="color-scheme" content="light" />
     <script is:inline>
@@ -20,12 +34,13 @@ import '../styles/app.css';
     </script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=Noto+Serif+JP:wght@500;700;900&family=Yuji+Syuku&display=swap" />
+    <link rel="stylesheet" href={mastheadFont} />
+    <Fragment set:html={`<link rel="preload" as="style" href="${textFonts}" onload="this.onload=null;this.rel='stylesheet'">`} />
+    <noscript><link rel="stylesheet" href={textFonts} /></noscript>
     <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32" />
     <link rel="icon" href="/icon-192.png" type="image/png" sizes="192x192" />
-    <link rel="apple-touch-icon" href="/icon-192.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180" />
     <link rel="manifest" href="/site.webmanifest" />
-    <title>ＦＤＥレーダー — AI導入の一次情報を集約</title>
   </head>
   <body>
     <RadarApp client:load />
