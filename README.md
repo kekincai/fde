@@ -1,8 +1,26 @@
-# ＦＤＥレーダー（FDE Radar）
+<p align="center">
+  <a href="https://fde.kejincai.dev"><img src="public/ai-fde-mark-512.png" alt="ＦＤＥレーダーのマーク" width="88"></a>
+</p>
 
-> AI を「試した」で終わらせず、顧客の現場で使える成果へつなげるための、日本語フィールドインテリジェンス。
+<h1 align="center">ＦＤＥレーダー（FDE Radar）</h1>
 
-[公開サイト](https://fde.kejincai.dev) · [ドキュメント](#ドキュメント) · [Issue](https://github.com/kekincai/fde/issues)
+<p align="center">
+  AI を「試した」で終わらせず、顧客の現場で使える成果へつなげるための、日本語フィールドインテリジェンス。
+</p>
+
+<p align="center">
+  <a href="https://fde.kejincai.dev"><img alt="公開サイト" src="https://img.shields.io/badge/%E5%85%AC%E9%96%8B%E3%82%B5%E3%82%A4%E3%83%88-fde.kejincai.dev-121212?style=flat-square"></a>
+  <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-121212?style=flat-square"></a>
+  <a href="docs/architecture.md"><img alt="Cloudflare Workers" src="https://img.shields.io/badge/Cloudflare-Workers%20%C2%B7%20D1%20%C2%B7%20Workers%20AI-5A5A5A?style=flat-square&logo=cloudflare&logoColor=white"></a>
+  <a href="docs/architecture.md"><img alt="Astro + Hono" src="https://img.shields.io/badge/Astro%20%2B%20Hono-TypeScript-5A5A5A?style=flat-square"></a>
+</p>
+
+<p align="center">
+  <a href="https://fde.kejincai.dev"><b>サイトを開く</b></a> ·
+  <a href="docs/overview.md">読み方</a> ·
+  <a href="#ドキュメント">ドキュメント</a> ·
+  <a href="https://github.com/kekincai/fde/issues/new/choose">情報源の提案・不具合の報告</a>
+</p>
 
 ![一面（トップページ）](docs/screenshots/front.png)
 

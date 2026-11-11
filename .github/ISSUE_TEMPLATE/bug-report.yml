@@ -1,0 +1,35 @@
+name: 不具合・誤収録の報告
+description: 表示の崩れ、動かない操作、対象外の記事が載っている、などを報告する
+title: "[不具合] "
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: kind
+    attributes:
+      label: 種類
+      options:
+        - 画面の表示・操作
+        - 対象外の記事が載っている / 分類や優先度がおかしい
+        - ログイン・保存
+        - その他
+    validations:
+      required: true
+  - type: input
+    id: page
+    attributes:
+      label: 起きたページの URL
+      placeholder: https://fde.kejincai.dev/?a=...
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: 何が起きたか
+      description: 期待した動きと実際の動き。スクリーンショットがあれば貼ってください
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: 端末とブラウザー
+      placeholder: iPhone 16 / Safari、Windows 11 / Chrome など

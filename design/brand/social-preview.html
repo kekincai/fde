@@ -1,0 +1,48 @@
+<!doctype html>
+<!-- Source for social-preview.png (GitHub social preview, 1280 × 640).
+     Render: headless Chrome at --window-size=1280,640 with a screenshot of docs/screenshots/front.png beside it. -->
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@500;700&family=Noto+Serif+JP:wght@700;900&family=Yuji+Syuku&display=block" rel="stylesheet">
+<style>
+  :root { --paper: #FFFFFF; --ink: #121212; --ink-3: #5A5A5A; --rule: #DFDFDF; --p0: #B3261E; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; width: 1280px; height: 640px; overflow: hidden; background: var(--paper); color: var(--ink); }
+  .sheet { position: absolute; inset: 40px 48px; display: grid; grid-template-columns: 1fr 470px; gap: 48px; }
+  .left { display: flex; flex-direction: column; }
+  .meta { font: 500 17px/1 'Noto Sans JP', sans-serif; color: var(--ink-3); display: flex; justify-content: space-between; padding-bottom: 14px; }
+  .rule { border-top: 3px solid var(--ink); border-bottom: 1px solid var(--ink); height: 7px; }
+  .daiji { font: 400 92px/1.1 'Yuji Syuku', serif; margin: 30px 0 4px; letter-spacing: 0; white-space: nowrap; }
+  .lede { font: 900 29px/1.55 'Noto Serif JP', serif; margin: 14px 0 0; }
+  .lede em { font-style: normal; color: var(--p0); }
+  .stages { margin-top: auto; display: flex; border-top: 1px solid var(--ink); }
+  .stages div { flex: 1; padding: 14px 0 0; font: 700 21px/1.3 'Noto Serif JP', serif; }
+  .stages div + div { border-left: 1px solid var(--rule); padding-left: 14px; }
+  .stages small { display: block; font: 500 14px/1.6 'Noto Sans JP', sans-serif; color: var(--ink-3); }
+  .foot { display: flex; justify-content: space-between; margin-top: 22px; font: 700 18px/1 'Noto Sans JP', sans-serif; }
+  .foot span { color: var(--ink-3); font-weight: 500; }
+  .shot { border: 1px solid var(--ink); overflow: hidden; height: 560px; }
+  .shot img { width: 1000px; display: block; margin-left: -530px; margin-top: -10px; }
+</style>
+</head>
+<body>
+  <div class="sheet">
+    <div class="left">
+      <div class="meta"><span>AI 導入の一次情報を、現場の判断材料に</span><span>六時間ごとに収集</span></div>
+      <div class="rule"></div>
+      <div class="daiji">ＦＤＥレーダー</div>
+      <p class="lede">AI を「試した」で終わらせない。<br>現場で使える成果へつなぐ<em>一次情報</em>の紙面。</p>
+      <div class="stages">
+        <div>顧客課題<small>Customer</small></div>
+        <div>構築<small>Build</small></div>
+        <div>本番導入<small>Deploy</small></div>
+        <div>統制・安全<small>Govern</small></div>
+        <div>組織定着<small>Organization</small></div>
+      </div>
+      <div class="foot">fde.kejincai.dev<span>五つの工程 · 二十四の問い</span></div>
+    </div>
+    <div class="shot"><img src="../../docs/screenshots/front.png" alt=""></div>
+  </div>
+</body>
+</html>

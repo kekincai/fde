@@ -1,0 +1,51 @@
+name: 情報源の提案
+description: 収集してほしい一次情報（公式ブログ、導入事例、制度、採用ページなど）を提案する
+title: "[情報源] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        FDE Radar は「AI を現場の成果につなげる」ための一次情報だけを載せます。収録条件は [収集と公開判定](https://github.com/kekincai/fde/blob/main/docs/ingestion-architecture.md#収録条件) を参照してください。
+  - type: input
+    id: url
+    attributes:
+      label: 情報源の URL
+      description: RSS / Atom / API があればその URL も
+      placeholder: https://example.com/blog/feed.xml
+    validations:
+      required: true
+  - type: dropdown
+    id: stage
+    attributes:
+      label: 主に答える工程
+      options:
+        - Customer（顧客課題）
+        - Build（構築）
+        - Deploy（本番導入）
+        - Govern（統制・安全）
+        - Organization（組織定着）
+        - 複数・分からない
+    validations:
+      required: true
+  - type: dropdown
+    id: region
+    attributes:
+      label: 地域
+      options:
+        - 日本
+        - グローバル
+  - type: textarea
+    id: why
+    attributes:
+      label: なぜ役に立つか
+      description: どの問い（章）が薄くなっているか、どんな記事が期待できるか
+    validations:
+      required: true
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: 確認
+      options:
+        - label: ログインや CAPTCHA なしで公開されている情報です
+          required: true
