@@ -28,15 +28,18 @@ const mastheadFont = `https://fonts.googleapis.com/css2?family=Yuji+Syuku&displa
     <meta name="twitter:card" content="summary" />
     <meta name="theme-color" content="#FFFFFF" />
     <meta name="color-scheme" content="light" />
+    <!-- Paint white from the very first frame (iOS dark mode otherwise shows black until the stylesheet arrives). -->
+    <style is:inline>html { background: #fff; color-scheme: light; }</style>
     <script is:inline>
       // Vertical multi-column text only where it renders reliably (current Chrome, Safari 17.4+, Firefox).
       if (window.CSS && CSS.supports('writing-mode', 'vertical-rl') && CSS.supports('column-fill', 'auto') && CSS.supports('text-wrap', 'balance')) document.documentElement.classList.add('tate-ok');
     </script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link rel="stylesheet" href={mastheadFont} />
-    <Fragment set:html={`<link rel="preload" as="style" href="${textFonts}" onload="this.onload=null;this.rel='stylesheet'">`} />
-    <noscript><link rel="stylesheet" href={textFonts} /></noscript>
+    <!-- No web font may hold up the first paint: if Google Fonts is slow or unreachable, the page shows in the
+         device's own Mincho / Gothic and switches when the fonts arrive. -->
+    <Fragment set:html={[mastheadFont, textFonts].map((href) => `<link rel="preload" as="style" href="${href}" onload="this.onload=null;this.rel='stylesheet'">`).join('')} />
+    <noscript><link rel="stylesheet" href={mastheadFont} /><link rel="stylesheet" href={textFonts} /></noscript>
     <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32" />
     <link rel="icon" href="/icon-192.png" type="image/png" sizes="192x192" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180" />
