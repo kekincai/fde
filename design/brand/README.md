@@ -1,9 +1,13 @@
-# AI FDE RADAR brand mark
+# ＦＤＥレーダー brand mark
 
-The master raster mark was generated for this project with OpenAI's built-in image generation tool. It represents six connected field signals around an AI core, with one route extending outward to show technology reaching production and field knowledge returning to the loop.
+The current mark is the calligraphic 「Ｆ」 in a single ink frame, drawn for the newspaper redesign (see `design/newspaper-redesign-prompt.md`). The web files are:
 
-## Production prompt
+| File | Use |
+|---|---|
+| `public/favicon-32.png` | browser tab |
+| `public/icon-192.png` | manifest, small home-screen icon |
+| `public/apple-touch-icon.png` | iOS home screen (180 × 180) |
+| `public/ai-fde-mark-512.png` | manifest, `og:image` |
+| `public/icon-maskable-512.png` | Android adaptive icon; the mark sits inside the 80 % safe zone on white |
 
-> Create a distinctive minimal symbol showing six connected signal nodes orbiting a precise central AI core, with one continuous route extending outward to suggest delivering technology into the field and feeding knowledge back. Use a premium flat editorial identity style, vector-friendly geometry, deep ink navy, electric cobalt blue, a tiny warm vermilion accent, and a warm off-white background. No text, 3D, shadow, texture, watermark, brain, robot face, chat bubble, sparkle, lightning bolt, infinity symbol, atom symbol, or corporate swoosh.
-
-The hand-authored `public/favicon.svg` is a reduced small-size interpretation of the master mark. `public/ai-fde-mark-512.png` and `public/icon-192.png` are optimized web derivatives.
+The earlier "six signal nodes" master raster (`design/brand/ai-fde-mark-master.png`) and the pre-redesign screenshots under `docs/design/` were removed on 2026-11-11. Both remain in git history (last present at `d818211`).

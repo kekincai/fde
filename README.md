@@ -1,4 +1,4 @@
-# FDE RADAR
+# ＦＤＥレーダー（FDE Radar）
 
 > AI を「試した」で終わらせず、顧客の現場で使える成果へつなげるための、日本語フィールドインテリジェンス。
 
@@ -11,19 +11,25 @@ FDE Radar は一般的な AI ニュース集約サイトではありません。
 ## 目次
 
 - [FDE Radar が扱うもの](#fde-radar-が扱うもの)
+- [主な機能](#主な機能)
 - [システム構成](#システム構成)
 - [収集と公開判定](#収集と公開判定)
 - [Workers AI による編集審査](#workers-ai-による編集審査)
 - [データ構造](#データ構造)
 - [パスキー認証](#パスキー認証)
+- [リポジトリ構成](#リポジトリ構成)
+- [画面とアイコンの設計](#画面とアイコンの設計)
 - [ローカル開発](#ローカル開発)
 - [Cloudflare の構築](#cloudflare-の構築)
 - [デプロイと変更手順](#デプロイと変更手順)
 - [収集の運用](#収集の運用)
 - [日常メンテナンス](#日常メンテナンス)
 - [障害対応](#障害対応)
+- [管理者の設定](#管理者の設定)
 - [API](#api)
-- [プライバシー、著作権、安全境界](#プライバシー著作権安全境界)
+- [プライバシー、著作権、安全境界](#privacy)
+- [Git 運用](#git-運用)
+- [現在の制約](#現在の制約)
 
 ## FDE Radar が扱うもの
 
@@ -54,14 +60,14 @@ flowchart LR
 | Govern | Security、Evaluation、Privacy、Regulation、Reliability |
 | Organization | FDEの役割、AI CoE、Change Management、人材・採用、AI-native組織 |
 
-各章には最低記事数と最低 Source 数を設定しています。`GET /api/coverage` は記事数、供給 Source 数、日本記事数、推奨アクション付き記事数、最終公開日を返し、`healthy / thin / empty` を判定します。
+各章には最低記事数と最低 Source 数を設定しています。`GET /api/coverage` は章ごとの公開記事数、供給 Source 数、日本記事数を返し、`healthy / thin / empty` を判定します。画面では `healthy` 以外（`thin` と `empty`）をまとめて「薄い章」として朱で示します。
 
 ## 主な機能
 
 - 6時間ごとの自動収集と、1 Source = 1 Queue message の障害分離
-- 24章のナレッジマップ、章・地域・優先度・テーマ別フィルター
-- D1 FTS5 を使った日本語検索と10件単位のページング
-- P0（今日対応）/ P1（今週検証）/ P2（背景学習）の判断レベル
+- 24章のナレッジマップ、種類（実務 / リサーチ / 求人）・章・地域・優先度・テーマ別フィルター
+- D1 FTS5 を使った日本語検索と1面20件のページング
+- P0（きょう対応）/ P1（今週検証）/ P2（背景学習）の判断レベル
 - メールアドレスとパスワードを使わないパスキー登録・ログイン
 - ログインユーザーの記事保存とセッション管理
 - 管理者専用の利用状況、Source 品質、収集状態ダッシュボード
@@ -78,9 +84,10 @@ flowchart TB
         Edge --> Assets["Astro Static Assets<br/>日本語 UI / SEO"]
         Edge --> Worker["Hono Worker<br/>API / Auth / Ingest"]
         Worker --> D1["D1 + FTS5<br/>記事・Source・認証・分析"]
-        Worker --> KV["KV<br/>レート制限・短期キャッシュ"]
+        Worker --> KV["KV<br/>メール通知の cooldown"]
+        Worker --> Cache["Cache API<br/>公開 GET の edge cache"]
         Worker --> AI["Workers AI<br/>境界候補の意味判定"]
-        Cron["Cron Trigger<br/>0 */6 * * *"] --> Worker
+        Cron["Cron Trigger<br/>0 */6 · */30 · 30 9（UTC）"] --> Worker
         Worker --> Queue["Cloudflare Queue<br/>1 Source / message"]
         Queue --> Consumer["Queue Consumer<br/>取得・判定・保存"]
         Consumer --> D1
@@ -100,11 +107,12 @@ flowchart TB
 |---|---|---|
 | Astro + React | 公開画面、検索・絞り込み、パスキー UI、管理画面 | ビルド済み静的アセット |
 | Hono Worker | API、認証、ランキング、収集制御、Queue consumer | 永続データを直接保持しない |
-| D1 | 公開記事、Source、判定履歴、ユーザー、保存、分析 | サービスの正本メタデータ |
+| D1 | 公開記事、Source、判定履歴、ユーザー、保存、分析、リクエスト制限 | サービスの正本メタデータ |
 | FTS5 | 日本語検索用インデックス | タイトル、要約、タグ、検索トークン |
 | Workers AI | ルールだけでは判定できない候補の意味判定 | 結果は D1 に監査情報として保存 |
 | Queues | Source ごとの非同期実行と再試行 | 一時的な ingest message |
-| KV | 収集・メール通知の短期状態 | TTL 付きデータ |
+| KV | 日報の送信済み印と、異常メールの Source ごとの cooldown | TTL 付きデータ |
+| Cache API | `/api/articles`・`/api/articles/:id`・`/api/overview`・`/api/coverage` の edge cache（`s-maxage`） | 公開レスポンスの一時コピー |
 | Hyperdrive + PostgreSQL | 許可された構造化取得スナップショット | `fde.source_archives` |
 | R2 | PostgreSQL を使わない構成の任意 fallback | JSON スナップショット |
 
@@ -125,7 +133,7 @@ flowchart TD
     Policy -->|"取得成功"| Normalize["URL・時刻・文字列を正規化"]
     Normalize --> Gate{"Hard Gate"}
     Gate -->|"対象外"| Rejected["rejected と理由を保存"]
-    Gate -->|"明確に対象"| Dedupe["URL / hash / event fingerprint"]
+    Gate -->|"明確に対象"| Dedupe["URL / content hash"]
     Gate -->|"境界候補"| Semantic["Workers AI<br/>JSON Schema 判定"]
     Semantic -->|"失敗 / 不確実"| Pending["pending に保持"]
     Semantic -->|"reject"| Rejected
@@ -149,7 +157,7 @@ AI という語があるだけでは公開しません。次のいずれかに�
 
 | 優先度 | 意味 | 代表例 |
 |---|---|---|
-| P0 | 今日対応 | 直近14日以内の明確な脆弱性、侵害、破壊的変更、提供終了 |
+| P0 | きょう対応 | 直近14日以内の明確な脆弱性、侵害、破壊的変更、提供終了 |
 | P1 | 今週検証 | 本番化、認証、監視、連携、費用などの実装・運用候補 |
 | P2 | 背景学習 | 論文、調査、採用、組織、長期的な判断材料 |
 
@@ -212,15 +220,14 @@ flowchart LR
 
 | `semanticPolicy` | 動作 | 用途 |
 |---|---|---|
-| `required` | Hard Gate を通った候補を Workers AI で審査 | ニュース、一覧ページ、コミュニティ、研究など |
-| `fallback` | Hard Gate が `review` の候補だけ審査 | ルールで明確な記事は直接扱い、境界だけAIへ渡す場合 |
+| `required`（既定） | Hard Gate を通った候補を Workers AI で審査 | ニュース、一覧ページ、コミュニティ、研究など |
 | `none` | Workers AI を呼ばず、Hard Gate と固定分類で処理 | 内容が限定された公式ガイド、価格、制度、専門ページ |
 
 `none` は「無審査」ではありません。Source の利用範囲、Hard Gate、最低 score、重複排除、固定章、公開 baseline を通過する必要があります。
 
 ### 費用と過負荷の制御
 
-各 Source は `dailyItemCap` を持ち、その日の `semantic_reviewed_count` を差し引いて Workers AI の残り枠を計算します。枠を超えた候補は捨てずに `pending` へ残します。これにより、一覧ページの大量更新や parser 異常が Workers AI quota を一度に消費することを防ぎます。
+各 Source は `dailyItemCap` を持ち、その日（JST）の `semantic_reviewed_count` を差し引いて Workers AI の残り枠を計算します。枠を超えた候補は捨てずに `pending` へ残し、次回に審査します。AI が `review`（または確度不足の `publish`）と判定した `pending` は、内容が変わらない限り再審査しません。強制的に再審査する場合は、migration で対象行の `semantic_decision` を `'pending'` に戻します。これにより、一覧ページの大量更新や parser 異常が Workers AI quota を一度に消費することを防ぎます。
 
 ### 監査可能性
 
@@ -240,14 +247,11 @@ erDiagram
     SOURCES ||--o{ INGEST_CANDIDATES : discovers
     SOURCES ||--o{ ARTICLES : publishes
     SOURCES ||--o{ SOURCE_QUALITY_DAILY : measures
-    ARTICLES ||--o{ ARTICLE_VERSIONS : versions
     ARTICLES ||--o{ USER_BOOKMARKS : saved_by
-    ARTICLES ||--o{ USER_ACTIONS : receives
     ARTICLES ||--o{ ANALYTICS_EVENTS : referenced_by
     USERS ||--o{ PASSKEY_CREDENTIALS : owns
     USERS ||--o{ USER_SESSIONS : owns
     USERS ||--o{ USER_BOOKMARKS : creates
-    USERS ||--o{ USER_ACTIONS : performs
     USERS ||--o{ ANALYTICS_EVENTS : may_generate
 
     SOURCES {
@@ -295,20 +299,21 @@ erDiagram
 | `ingest_candidates` | Hard Gate と Workers AI の判定監査 |
 | `articles` | 公開・抑制・アーカイブされた記事メタデータ |
 | `articles_fts` | FTS5 検索インデックス |
-| `article_versions` | タイトル・要約が変わったときの履歴 |
 | `source_quality_daily` | 発見、除外、公開、重複、AI エラーの日次集計 |
 | `users` / `passkey_credentials` / `user_sessions` | パスキー認証と権限 |
-| `user_bookmarks` / `user_actions` | 保存と記事行動 |
+| `user_bookmarks` | 保存した記事 |
 | `analytics_events` | 最小限の利用状況分析 |
 | `request_rate_limits` | 認証と匿名分析 API の原子的なリクエスト制限 |
 
 記事の `status` は公開状態を表します。
 
-- `published`: 公開 API と画面に表示
+- `published`: 公開 API と画面に表示（さらに `fde_score >= 40` のものだけ。一覧、単体、件数、章の集計、日報、保存一覧で同じ条件）
 - `pending`: 再判定待ち
 - `rejected`: 収録条件を満たさない
 - `suppressed`: 監査用に保持するが公開しない
 - `archived`: 公開ベースライン以前など、履歴として保持
+
+`suppressed` と `archived` は再取得で内容が変わっても `published` に戻りません。戻す場合は migration で明示的に更新します。公開日時が公開ベースライン（2026-06-01 JST）より前の item は、定期収集でも `rejected` として記録し公開しません。
 
 ## パスキー認証
 
@@ -346,43 +351,55 @@ sequenceDiagram
 │   │   ├── RadarApp.tsx     # 公開画面の状態と画面 composition
 │   │   ├── radar/           # 一覧・詳細・絞り込み・認証・ナレッジマップ、URL 状態と取得の hook
 │   │   └── AdminDashboard.tsx
+│   ├── data/                # 記事型・ラベル・サイト名とドメイン（site.ts）
 │   ├── lib/                 # ブラウザー側の最小分析
-│   ├── pages/               # Astro entry point
+│   ├── pages/               # Astro entry point（meta、フォント）
 │   └── styles/app.css       # デザイントークンと全画面のスタイル
 ├── worker/
 │   ├── index.ts             # Hono API、認証、取得、Queue consumer
+│   ├── parsers.ts           # RSS / API / HTML / YouTube の解析
+│   ├── vocabulary.ts        # 解析と Hard Gate が共有するキーワード
 │   ├── sourceRegistry.ts    # Source、取得方針、担当章
-│   ├── intelligence.ts      # Hard Gate と Workers AI 判定
+│   ├── intelligence.ts      # Hard Gate と Workers AI 判定、公開ベースライン
+│   ├── fetchPolicy.ts       # User-Agent、backoff、Queue retry の数え方
+│   ├── emailNotifications.ts# 異常メールと日報
 │   ├── articleSort.ts       # 新着・重要度・公開日の安全な SQL ordering
 │   ├── chapters.ts          # 24章と分類規則
-│   └── *.test.ts            # 収録条件と章供給の回帰テスト
+│   └── *.test.ts            # 回帰テスト（src/**/*.test.ts も同じ npm test で実行）
 ├── migrations/
-│   ├── 0001...0023         # D1 schema とデータ補正
+│   ├── 0001...0025          # D1 schema とデータ補正
 │   └── postgres/            # 取得 snapshot 用 schema
+├── design/                  # 紙面デザインの指示とブランドマーク
 ├── docs/
-│   ├── ingestion-architecture.md
-│   └── design/              # 画面設計の確認画像
+│   └── ingestion-architecture.md
+├── eslint.config.js
 ├── astro.config.mjs
 ├── wrangler.toml
 └── package.json
 ```
 
-## アイコン設計
+## 画面とアイコンの設計
 
-### 画面の共通スタイル
+### 紙面
 
-スタイルは `src/styles/app.css` の1ファイルです。先頭の `:root` に色・書体・余白のトークンを置き、`prefers-color-scheme: dark` で同じトークンを上書きしてダークモードに対応します。紙色の背景、墨色の本文、ロゴの三角形と同じ朱色を唯一のアクセント（P0 と選択状態）として使います。本文は IBM Plex Sans JP、時刻・件数・ラベルは IBM Plex Mono です。
+画面は日本の新聞のブランケット判を手本にしています。スタイルは `src/styles/app.css` の1ファイルで、先頭の `:root` に色・書体・余白のトークンを置きます。白い紙、墨色の本文、灰色の罫、色は朱（P0 と薄い章）だけです。ダークモードはありません（`color-scheme: light`）。本文は Noto Serif JP、操作とラベルは Noto Sans JP、題字「ＦＤＥレーダー」だけ Yuji Syuku（6字にサブセット）です。
 
-- 収集情報（トップ）: 左サイドバーにナビゲーションと絞り込み、中央に日付ごとにまとめた一覧、1360px 以上では右に詳細ペイン。それより狭い幅では詳細は右からのシート、760px 未満では下からのシート。
-- 状態: 表示中の画面と絞り込みは URL に反映（`useRadarState`）。共有・ブラウザーの戻るに対応。
-- キーボード: `j` / `k` で記事を移動、`o` で一次情報、`s` で保存、`/` で検索、`Esc` で閉じる。
+- 一面（トップ）: 題字・号数・収集状況、トップ記事と肩、二段目、きょう対応（P0）・日本レンズ・二十四の問いの表、工程ごとの短信。縦組みに対応するブラウザーでは見出しと本文を縦組みにします。
+- 二面: 1記事の要点、確認ポイント、一次情報への導線、同じ問いの記事。
+- 三面: 二十四の問い（ナレッジマップ）。社説: ＦＤＥとは。
+- 報頭の朝刊 / 夕刊と版は、最後に成功した収集の時刻から決まります（静的ビルドには日付を書き込みません）。
+- 状態: 表示中の面と絞り込みは URL に反映（`useRadarState`）。共有・ブラウザーの戻るに対応。面が変わるとページタイトルとフォーカスも移ります。
+- キーボード: `j` / `k` で見出しを紙面の順に移動、`o` で一次情報、`s` で保存、`/` で検索、`Esc` で閉じる（アカウント画面が開いているときは画面だけ閉じる）。
 - 自動メモ: 生成された確認ポイント・関連箇所は、タイトルや概要の繰り返しなら表示しない。
-- 1100px 未満ではサイドバーの代わりに上部バー、絞り込みはシート。760px 未満は下部ナビゲーションとセーフエリアを確保。
+- 幅の区切りは 768px と 1100px です。768px 未満は1段組のモバイル紙面、768–1099px は段を減らした紙面、1100px 以上で全段。
+- 「この面を印刷」はブランケット判1枚（406 × 545 mm）に収まるよう縮小し、PDF 名に号数と面を入れます。
 - 動きを減らす設定では、アニメーションとスクロール演出を停止。
 
-変更時は収集情報・詳細・24の問い・About・アカウント・管理画面を、390px、1200px、1440px とダークモードで確認してください。
+変更時は一面・二面・三面・社説・アカウント・管理画面を、390px、900px、1440px と印刷プレビューで確認してください。
 
-UI アイコンは MIT ライセンスの [Tabler Icons](https://tabler.io/icons) に統一しています。React では `@tabler/icons-react` を利用し、`src/components/radar/Icon.tsx` の明示的な対応表から必要なアイコンだけを読み込みます。名前空間全体の動的 import は行わないため、アイコン数を増やしても未使用の数千アイコンを本番 bundle に含めません。
+### アイコン
+
+UI アイコン（管理画面のみ）は MIT ライセンスの [Tabler Icons](https://tabler.io/icons) に統一しています。React では `@tabler/icons-react` を利用し、`src/components/radar/Icon.tsx` の明示的な対応表から必要なアイコンだけを読み込みます。名前空間全体の動的 import は行わないため、アイコン数を増やしても未使用の数千アイコンを本番 bundle に含めません。
 
 - 基準グリッド: 24 × 24
 - 標準 stroke: 1.8
@@ -409,22 +426,24 @@ npm run dev
 
 ```bash
 npm run db:migrate:local
-npm run db:seed
 npm run cf:dev
 ```
+
+Source は Worker が起動時・収集時に `worker/sourceRegistry.ts` から同期するため、seed は不要です。
 
 `cf:dev` は先に Astro を build し、Static Assets と Worker API を同じ Wrangler 開発環境で起動します。
 
 ### 品質チェック
 
 ```bash
-npm test
+npm test          # worker/ と src/ の *.test.ts（node --test + tsx）
+npm run lint
 npm run check
 npx tsc --noEmit
 npm run build
 ```
 
-テストでは、24章が欠落していないこと、すべての章に最低3 Source が設定されていること、一般 AI ニュースを除外すること、企業導入・FDE求人・日本のプライバシー情報を正しく扱うことを確認します。
+テストでは、feed 解析、24章が欠落していないこと、すべての章に最低3 Source が設定されていること、一般 AI ニュースを除外すること、企業導入・FDE求人・日本のプライバシー情報を正しく扱うことを確認します。
 
 ## Cloudflare の構築
 
@@ -437,6 +456,7 @@ npm run build
 | `CACHE` | KV namespace | 必須 |
 | `INGEST_QUEUE` | Queue producer / consumer | 必須 |
 | `AI` | Workers AI | 必須 |
+| `CF_VERSION_METADATA` | Worker のバージョン情報（`/api/health`） | 必須（設定のみ） |
 | `HYPERDRIVE` | PostgreSQL archive | 現在の本番で使用 |
 | `ARCHIVE` | R2 bucket | 任意、現在は未設定 |
 
@@ -448,18 +468,20 @@ npm run build
 4. Workers AI の `AI` binding を設定する。
 5. PostgreSQL を使う場合は `migrations/postgres/0001_archive.sql` を実行し、Hyperdrive を設定する。
 6. R2 fallback を使う場合だけ bucket を作り、`ARCHIVE` binding を有効にする。
-7. ingest の手動 API と、Resend の通知先を secret で設定する。`INGEST_TOKEN` が未設定の場合、手動収集は拒否される。
+7. ingest の手動 API、メールのテスト API、Resend の送信設定を secret で設定する。`INGEST_TOKEN` が未設定の場合、手動収集と `/api/ingest/status` の token 認証は拒否される。
 8. D1 migration を適用し、deploy する。
 
 ```bash
 npx wrangler secret put INGEST_TOKEN
+npx wrangler secret put EMAIL_TEST_TOKEN
 npx wrangler secret put RESEND_API_KEY
 npx wrangler secret put RESEND_TO
+npx wrangler secret put RESEND_FROM
 npm run db:migrate:remote
 npm run cf:deploy
 ```
 
-`RESEND_TO` には通知先メールアドレスを設定します。接続文字列、PostgreSQL のパスワード、API token、メールアドレス、各種 secret は Git に保存しません。
+`RESEND_TO` には通知先メールアドレスを設定します。`RESEND_FROM` は Resend で認証したドメインの送信者（例: `FDE Radar <alerts@example.com>`）です。未設定の場合は Resend の sandbox 送信者 `onboarding@resend.dev` を使い、Resend アカウント本人のアドレスにしか届きません。`EMAIL_TEST_TOKEN` は `POST /api/ingest/email/test`（接続テストと日報の試験送信）専用です。接続文字列、PostgreSQL のパスワード、API token、メールアドレス、各種 secret は Git に保存しません。
 
 ## デプロイと変更手順
 
@@ -476,7 +498,9 @@ flowchart LR
     Build --> Smoke["health / coverage / ingest status"]
 ```
 
-`main` への push は Cloudflare Workers Builds（`kekincai/fde` の `main` に接続済み）が自動でビルドし、`npx wrangler deploy` で本番へ出します。GitHub Actions は使いません。D1 migration は自動では実行されないため、schema 変更がある場合は push の前に remote migration を適用してください。手元から直接出す場合は従来どおり `npm run cf:deploy` も使えます。
+`main` への push は Cloudflare Workers Builds（`kekincai/fde` の `main` に接続済み）が自動でビルドし、`npx wrangler deploy` で本番へ出します。GitHub Actions は使いません。手元から直接出す場合は `npm run cf:deploy` も使えます。
+
+D1 migration は自動では実行されません。列やテーブルを**追加**する migration は push の前に適用します（新しいコードがそれを読むため）。列やテーブルを**削除**する migration は逆で、それを書かなくなったコードを deploy した後に適用します（古いコードがまだ書いているため）。`0025_drop_unread_schema.sql` は後者です。
 
 通常のリリース前に、最低限次を確認します。
 
@@ -497,7 +521,7 @@ schema 変更がないリリースで D1 migration を実行しても、適用�
 ```bash
 curl -fsS https://fde.kejincai.dev/api/health
 curl -fsS https://fde.kejincai.dev/api/coverage
-curl -fsS https://fde.kejincai.dev/api/ingest/status
+curl -fsS -H "Authorization: Bearer $INGEST_TOKEN" https://fde.kejincai.dev/api/ingest/status
 ```
 
 ## 収集の運用
@@ -510,7 +534,7 @@ Cron は UTC で3本設定しています。
 |---|---|---|
 | `0 */6 * * *` | 6時間ごと | 期限を迎えた Source を Queue に投入 |
 | `*/30 * * * *` | 30分ごと | D1 の Source 健康状態を確認し、継続障害だけをメール通知 |
-| `30 9 * * *` | 毎日18:30 | 当日新着記事と収集健康度の日報をメール送信 |
+| `30 9 * * *` | 毎日18:30 | 直近24時間の新着記事と収集健康度の日報をメール送信 |
 
 Queue consumer は `max_batch_size = 1`、`max_retries = 3`、`max_concurrency = 5` です。
 
@@ -573,20 +597,20 @@ flowchart TD
 ### 毎日見るもの
 
 - `/api/health`: Worker と基本 binding の応答
-- `/api/ingest/status`: Source の最終成功、失敗、backoff、直近 run
+- `/api/ingest/status`: Source の最終成功、失敗、backoff、直近 run（admin session または `INGEST_TOKEN`）
 - `/api/coverage`: 24章の `healthy / thin / empty`
 - 管理画面: page view、記事 open、保存、Source 品質
 
 ### メール通知
 
-Cloudflare Free では Log Explorer の Scheduled Query と Email Sending が有料のため、FDE Radar は D1 を直接監視し、Resend Free から管理者へ送信します。ログ発生ではなく最終的な Source 状態を判定するため、一時的な失敗が後続 retry で回復した場合は通知しません。
+Cloudflare Free では Log Explorer の Scheduled Query と Email Sending が有料のため、FDE Radar は D1 を直接監視し、Resend Free から管理者へ送信します。ログ発生ではなく最終的な Source 状態を判定するため、一時的な失敗が後続 retry で回復した場合は通知しません。`consecutive_failures` は収集 run ごとに1つ進み、Queue の retry（最大3回）は数えません。retry 中の失敗は記録せず、最後の配信で失敗したときだけ `fetch_runs` に error を1件書きます。403 は3回連続の run（通常約18時間）で7日間の手動確認 backoff に入ります。
 
 | メール | 条件 | 重複制御 |
 |---|---|---|
 | 収集異常 | 24時間以上の長期 backoff、`consecutive_failures >= 3`、または最終成功が期待周期の3倍（最低24時間）を超過 | Source ごとに6時間の cooldown |
 | 日報 | 毎日18:30 JST | JST の日付ごとに1回 |
 
-日報は当日初回収集された記事を P0 → P1 → P2、priority score、公開時刻の順で最大30件掲載し、記事要約、次の一手、取得成功率、正常 / 異常 Source 数を含めます。新着が0件でも収集健康度を送信します。外部由来のタイトル、URL、要約は HTML escape してからメールへ埋め込みます。
+日報は直近24時間（前回の日報以降）に初回収集された記事を P0 → P1 → P2、priority score、公開時刻の順で最大30件掲載し、記事要約、次の一手、取得成功率、正常 / 異常 Source 数を含めます。新着が0件でも収集健康度を送信します。外部由来のタイトル、URL、要約は HTML escape してからメールへ埋め込みます。
 
 Workers Logs の構造化 event `ingest_source_manual_review`、`ingest_batch_retry`、`ingest_archive_failed` は調査用として引き続き出力します。
 
@@ -644,22 +668,30 @@ npx wrangler d1 execute DB --remote \
 
 | Method | Path | 用途 | 認証 |
 |---|---|---|---|
-| GET | `/api/health` | 稼働確認 | 不要 |
-| GET | `/api/config` | filter 選択肢 | 不要 |
-| GET | `/api/articles` | 記事検索・ページング | 不要 |
-| GET | `/api/overview` | 公開件数と更新概要 | 不要 |
+| GET | `/api/health` | 稼働確認とデプロイ中の Worker バージョン | 不要 |
+| GET | `/api/articles` | 記事検索・ページング（`channel=action\|research\|career`、`region`、`pillar`、`layer`、`chapter`、`priority`、`q`、`sort`、`page`、`pageSize`） | 不要 |
+| GET | `/api/articles/:id` | 二面の直リンク用に1記事 | 不要 |
+| GET | `/api/overview` | 公開件数、最終収集時刻、Source 名 | 不要 |
 | GET | `/api/coverage` | 24章の供給状況 | 不要 |
-| GET | `/api/ingest/status` | Source と取得 run の状態 | 不要 |
+| POST | `/api/analytics/events` | 匿名の利用イベント（同一 origin、回数制限あり） | 不要 |
+| GET | `/api/ingest/status` | Source と取得 run の状態 | admin または `INGEST_TOKEN` |
 | POST | `/api/ingest/dispatch` | 手動収集 | `INGEST_TOKEN` |
 | POST | `/api/ingest/backfill` | 履歴投入 | `INGEST_TOKEN` |
+| POST | `/api/ingest/email/test` | メール接続テスト・日報の試験送信 | `EMAIL_TEST_TOKEN` |
 | POST | `/api/auth/passkey/*` | パスキー登録・ログイン | challenge / WebAuthn |
-| GET | `/api/auth/me` | 現在の session | session |
-| GET/PUT/DELETE | `/api/bookmarks/*` | 保存記事 | session |
+| GET | `/api/auth/me` | 現在の session と保存 ID | session |
+| POST | `/api/auth/logout` | ログアウト | session |
+| GET | `/api/auth/sessions` | ログイン中のセッション一覧 | session |
+| DELETE | `/api/auth/sessions/:id` | セッションの終了 | session |
+| GET | `/api/bookmarks` | 保存記事（公開中のものだけ） | session |
+| PUT/DELETE | `/api/bookmarks/:id` | 保存・解除 | session |
 | GET | `/api/admin/analytics` | 管理統計 | admin |
 
 詳細な request / response は実装中の型と各 route を正とします。APIを変更した場合は、この表と画面の呼び出しを同じ commit で更新してください。
 
 `/api/articles` と `/api/bookmarks` は `sort=newest|priority|published` を受け取ります。省略時は `newest` です。`newest` は再取得時刻ではなく `first_seen_at` を使うため、古い記事を再巡回しても一覧の先頭へ戻りません。`priority` は P0 → P1 → P2 と重要度スコア、`published` は情報源の公開日時で並べます。
+
+<a id="privacy"></a>
 
 ## プライバシー、著作権、安全境界
 
@@ -688,7 +720,7 @@ npx wrangler d1 execute DB --remote \
 - Workers AI の日次上限を守るため、Source ごとに `dailyItemCap` を持つ。
 - 日本語要約は Source の公開情報と自動抽出を使い、過去記事を人手で一件ずつ再要約しない。
 - R2 fallback はコード上対応しているが、現在の production binding では有効化していない。
-- `astro.config.mjs` の `site` は汎用値のため、canonical URL を本格運用する場合は実ドメインへ更新する。
+- サイト名・ドメイン・リポジトリ URL は `src/data/site.ts` にまとめている。Worker の User-Agent（`worker/fetchPolicy.ts`）だけは相手サイトに見せる連絡先なので別に持つ。
 
 ## License
 
