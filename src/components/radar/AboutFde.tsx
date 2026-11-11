@@ -1,6 +1,6 @@
 import { priorityMeta, type Priority } from '../../data/articles';
 import { PaperHeader, SectionLink, SiteFooter, usePaper } from './Paper';
-import { kanjiNum, kanjiTime, zen } from './typeset';
+import { countLabel, kanjiNum, kanjiTime, zen } from './typeset';
 
 const fieldLoop = [
   ['顧客理解', '業務、制約、利用者、解くべき問題を現場で確認する。'],
@@ -10,7 +10,6 @@ const fieldLoop = [
   ['フィードバック', '効果を測り、学びを製品や再利用できる型に戻す。']
 ] as const;
 
-const ordinals = ['一', '二', '三', '四', '五'];
 
 const jobPosts = [
   { href: 'https://openai.com/careers/forward-deployed-engineer-tokyo-tokyo-japan/', title: 'OpenAI — Forward Deployed Engineer, Tokyo', note: '発見から本番展開までを担当。成功指標は本番採用と業務への測定可能な影響。' },
@@ -23,7 +22,7 @@ export default function AboutFde() {
   const counts = overview.counts ?? {};
   const sources = overview.sources?.length ?? 0;
 
-  return <article className="ab" aria-labelledby="ab-title">
+  return <article aria-labelledby="ab-title">
     <PaperHeader current="about" folio="（社説）　ＦＤＥとは" />
 
     <section className="ab-lead">
@@ -35,8 +34,8 @@ export default function AboutFde() {
         <p>【本紙の立場】ＡＩを「試した」で終わらせないために必要なのは、速報よりも一次情報の確かさだ。要約と分類は機械で作るため誤りを含みうる。判断の前には、必ず一次情報に当たってほしい。</p>
       </div>
       <dl className="ab-stats" aria-label="収録状況">
-        <div className="tate"><dt>公開中の記事</dt><dd>{kanjiNum(counts.total)}件</dd></div>
-        <div className="tate"><dt>うち日本</dt><dd>{kanjiNum(counts.japan)}件</dd></div>
+        <div className="tate"><dt>公開中の記事</dt><dd>{countLabel(counts.total)}</dd></div>
+        <div className="tate"><dt>うち日本</dt><dd>{countLabel(counts.japan)}</dd></div>
         <div className="tate"><dt>収集元</dt><dd>{sources ? `${kanjiNum(sources)}か所` : '―'}</dd></div>
         <div className="tate"><dt>最終収集</dt><dd>{kanjiTime(overview.last_ingested_at)}</dd></div>
       </dl>
@@ -47,7 +46,7 @@ export default function AboutFde() {
         <h2 id="ab-loop" className="ab-h2">五つの工程</h2>
         <p className="ab-text">ＦＤＥの仕事は、次の五段階の繰り返しである。学びは次の課題へ戻る。</p>
         <ol className="ab-steps">{fieldLoop.map(([title, copy], index) => <li key={title}>
-          <b>{ordinals[index]}、{title}</b><span>{copy}</span>
+          <b>{kanjiNum(index + 1)}、{title}</b><span>{copy}</span>
         </li>)}</ol>
         <SectionLink to="questions" className="text-link"><span>二十四の問いで見る（三面）</span></SectionLink>
       </section>

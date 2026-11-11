@@ -1,27 +1,20 @@
 import { useEffect, useState } from 'react';
 
-import { pillarLabels, priorityMeta, type Article } from '../../data/articles';
+import { contentTypeLabels, decisionLabels, japanLensLabels, pillarLabels, priorityMeta, sourceKindLabels, type Article } from '../../data/articles';
 import { fromApi, usefulNote, type ApiArticle } from './model';
 import { ArticleLink, ChapterLink, PaperHeader, SectionLink, SiteFooter, usePaper } from './Paper';
-import { actionItems, hostOf, kanjiDigits, kanjiMonthDay, kanjiTime, monthDay, splitHeadline, zen } from './typeset';
+import { actionItems, hostOf, kanjiDigits, kanjiMonthDay, kanjiNum, kanjiTime, monthDay, splitHeadline, zen } from './typeset';
 
-export type StoryPageProps = {
+type StoryPageProps = {
   /** null while a direct link is being resolved, or when the article was not found. */
   article: Article | null;
   loading: boolean;
+  failed?: boolean;
   /** Neighbours in the current 一面 list. */
   prev: Article | null;
   next: Article | null;
 };
 
-const contentTypeLabels: Record<string, string> = {
-  news: 'ニュース', 'case-study': '導入事例', paper: '論文', report: '調査報告', career: '求人', video: '動画', release: 'リリース', guide: '解説', blog: '解説', event: '催し'
-};
-const sourceKindLabels: Record<string, string> = {
-  official: '公式', government: '政府機関', media: '報道', community: 'コミュニティ', research: '研究機関', vendor: 'ベンダー'
-};
-const decisionLabels: Record<string, string> = { publish: '掲載', rules: '規則で掲載', pending: '審査待ち', skipped: '審査なし' };
-const ordinals = ['一', '二', '三', '四', '五'];
 
 function kanjiStamp(value: string): string {
   const day = kanjiMonthDay(value);
@@ -54,7 +47,7 @@ function useRelated(article: Article | null) {
   return related.id === articleId ? related.items : [];
 }
 
-export default function StoryPage({ article, loading, prev, next }: StoryPageProps) {
+export default function StoryPage({ article, loading, failed = false, prev, next }: StoryPageProps) {
   const paper = usePaper();
   const related = useRelated(article);
   const [copied, setCopied] = useState(false);
@@ -67,7 +60,7 @@ export default function StoryPage({ article, loading, prev, next }: StoryPagePro
       <div className="st-missing" aria-live="polite">
         {loading
           ? <p className="notice">記事を探しています…</p>
-          : <><p className="notice">この記事は見つかりませんでした。</p><SectionLink to="front" className="btn btn-kuro">一面へ戻る</SectionLink></>}
+          : <><p className="notice">{failed ? '記事を読み込めませんでした。時間をおいて再度お試しください。' : 'この記事は見つかりませんでした。'}</p><SectionLink to="front" className="btn btn-kuro">一面へ戻る</SectionLink></>}
       </div>
       <SiteFooter />
     </>;
@@ -77,7 +70,8 @@ export default function StoryPage({ article, loading, prev, next }: StoryPagePro
   const { main, sub } = splitHeadline(article.title);
   const chapter = paper.coverage.find((item) => item.id === article.chapterId);
   const view = usefulNote(article.whyItMatters, article);
-  const actions = article.recommendedAction ? actionItems(article.recommendedAction) : [];
+  const action = usefulNote(article.recommendedAction, article);
+  const actions = action ? actionItems(action) : [];
   const evidence = usefulNote(article.evidence, article);
   const tags = uniqueTags(article);
   const saved = paper.savedIds.includes(article.id);
@@ -100,7 +94,7 @@ export default function StoryPage({ article, loading, prev, next }: StoryPagePro
     <PaperHeader current="story" folio={`（二面）　${pillar}`} />
 
     {(prev || next) && <nav className="st-pager" aria-label="記事の前後">
-      {prev ? <ArticleLink article={prev} className="st-pager-prev"><span aria-hidden="true">←</span><span>前の記事　{prev.title}</span></ArticleLink> : <span />}
+      {prev ? <ArticleLink article={prev}><span aria-hidden="true">←</span><span>前の記事　{prev.title}</span></ArticleLink> : <span />}
       {next && <ArticleLink article={next} className="st-pager-next"><span>次の記事　{next.title}</span><span aria-hidden="true">→</span></ArticleLink>}
     </nav>}
 
@@ -115,7 +109,7 @@ export default function StoryPage({ article, loading, prev, next }: StoryPagePro
           <li>公開　{kanjiStamp(article.publishedAt || article.collectedAt)}</li>
           <li>収集　{kanjiStamp(article.collectedAt)}</li>
           <li>種別　{contentTypeLabels[article.contentType] ?? article.contentType}</li>
-          <li>関連度　{kanjiDigits(article.score)}／一〇〇</li>
+          <li>関連度　{kanjiDigits(Math.round(article.score))}／一〇〇</li>
         </ul>
       </header>
 
@@ -130,7 +124,7 @@ export default function StoryPage({ article, loading, prev, next }: StoryPagePro
         {(actions.length > 0 || evidence) && <section className="st-points kakomi">
           {actions.length > 0 && <>
             <h2 className="st-points-head">現場での確認ポイント</h2>
-            <ol className="st-points-list">{actions.map((item, index) => <li key={index}><span className="st-num" aria-hidden="true">{ordinals[index]}、</span>{item}</li>)}</ol>
+            <ol className="st-points-list">{actions.map((item, index) => <li key={index}><span className="st-num" aria-hidden="true">{kanjiNum(index + 1)}、</span>{item}</li>)}</ol>
           </>}
           {evidence && <>
             <h3 className="st-evidence-head">関連箇所</h3>
@@ -150,7 +144,7 @@ export default function StoryPage({ article, loading, prev, next }: StoryPagePro
 
         <dl className="st-facts">
           {chapter && <><dt>章</dt><dd><ChapterLink id={chapter.id} className="st-chapter">{pillarLabels[chapter.pillar] ?? chapter.pillar} › {chapter.titleJa}　{chapter.questionJa}</ChapterLink></dd></>}
-          {article.japanLens && <><dt>視点</dt><dd>日本レンズ　{article.japanLens}</dd></>}
+          {article.japanLens && <><dt>視点</dt><dd>日本レンズ　{japanLensLabels[article.japanLens] ?? article.japanLens}</dd></>}
           {tags.length > 0 && <><dt>影響</dt><dd>{tags.join(' · ')}</dd></>}
           {article.semanticDecision && <><dt>判定</dt><dd>編集審査 {decisionLabels[article.semanticDecision] ?? article.semanticDecision}{article.semanticConfidence > 0 ? `（確度 ${Math.round((article.semanticConfidence > 1 ? article.semanticConfidence / 100 : article.semanticConfidence) * 100)}%）` : ''}</dd></>}
           <dt>収集</dt><dd>{monthDay(article.collectedAt) || '不明'} · {article.region === 'Japan' ? '日本' : 'グローバル'}</dd>

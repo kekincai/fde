@@ -1,18 +1,16 @@
 import { Fragment, useMemo } from 'react';
 
 import { pillarLabels, type Article } from '../../data/articles';
-import { dayKey, type CoverageChapter } from './model';
+import { dayKey, isThinChapter, type CoverageChapter } from './model';
 import { ArticleLink, ChapterLink, PaperHeader, SiteFooter, usePaper } from './Paper';
 import { kanjiNum, kanjiTime, pillarOrder, pillarOrdinals } from './typeset';
 
-export type QuestionsPageProps = {
+type QuestionsPageProps = {
   /** Latest 一面 list, for 「きょうの一面の章」 and today's new titles per chapter. */
   articles: Article[];
 };
 
-type Chapter = CoverageChapter & { japanCount?: number };
-
-const isThin = (chapter: Chapter) => chapter.status !== 'healthy';
+const isThin = isThinChapter;
 
 /** Today's articles (JST) grouped by chapter, plus the chapters on today's 一面. */
 function useToday(articles: Article[]) {
@@ -38,13 +36,13 @@ function NewTitles({ items, limit, suffix }: { items: Article[]; limit: number; 
   </Fragment>)}{suffix}</>;
 }
 
-function Count({ chapter, size = 'lg' }: { chapter: Chapter; size?: 'lg' | 'sm' }) {
+function Count({ chapter, size = 'lg' }: { chapter: CoverageChapter; size?: 'lg' | 'sm' }) {
   return <p className={`qp-count qp-count-${size}`}>
     <b className={isThin(chapter) ? 'shu' : ''}>{chapter.publishedCount.toLocaleString('ja-JP')}</b> 件 · 情報源 {chapter.sourceCount}
   </p>;
 }
 
-type DanProps = { pillar: string; index: number; chapters: Chapter[]; newByChapter: Map<string, Article[]>; onFront: Set<string> };
+type DanProps = { pillar: string; index: number; chapters: CoverageChapter[]; newByChapter: Map<string, Article[]>; onFront: Set<string> };
 
 /** One 段: vertical pillar heading → lead question (most articles) → the rest by weight → thin chapters boxed in 朱. */
 function Dan({ pillar, index, chapters, newByChapter, onFront }: DanProps) {
@@ -82,7 +80,7 @@ function Dan({ pillar, index, chapters, newByChapter, onFront }: DanProps) {
     <div className="qp-rest">
       {major.map((chapter) => {
         const items = newByChapter.get(chapter.id) ?? [];
-        return <article key={chapter.id} className={`qp-cell qp-major ${onFront.has(chapter.id) ? 'is-front' : ''}`}>
+        return <article key={chapter.id} className={`qp-cell ${onFront.has(chapter.id) ? 'is-front' : ''}`}>
           <p className="qp-kicker">{chapter.titleJa}</p>
           <h3 className="qp-q qp-q-lg"><ChapterLink id={chapter.id}>{chapter.questionJa}</ChapterLink></h3>
           <p className="qp-note">{items.length ? <NewTitles items={items} limit={2} suffix="が新着。" /> : chapter.japanCount ? `日本の記事${chapter.japanCount.toLocaleString('ja-JP')}件を含む。` : '一次情報を継続して収集している。'}</p>
@@ -109,13 +107,13 @@ function Dan({ pillar, index, chapters, newByChapter, onFront }: DanProps) {
 /** 三面 — the 24 questions as a knowledge map, one 段 per pillar. */
 export default function QuestionsPage({ articles }: QuestionsPageProps) {
   const paper = usePaper();
-  const chapters = paper.coverage as Chapter[];
+  const chapters = paper.coverage;
   const { newByChapter, onFront } = useToday(articles);
   const healthy = chapters.filter((item) => !isThin(item)).length;
   const thin = chapters.length - healthy;
   const published = paper.overview.counts?.total ?? chapters.reduce((sum, item) => sum + item.publishedCount, 0);
 
-  return <article className="qp" aria-labelledby="qp-title">
+  return <article aria-labelledby="qp-title">
     <PaperHeader current="questions" folio="（三面）　ナレッジマップ" />
 
     <section className="qp-masthead">

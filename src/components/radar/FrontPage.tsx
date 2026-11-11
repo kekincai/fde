@@ -7,15 +7,17 @@
  */
 import { forwardRef, useEffect, useId, useMemo, useState, type FocusEvent, type ReactNode, type Ref } from 'react';
 
-import { pillarLabels, topics, type Article, type Priority, type Region, type SortOrder } from '../../data/articles';
-import { fromApi, parseDate, usefulNote, type ApiArticle, type CoverageChapter, type Pagination } from './model';
+import { japanLensLabels, pillarLabels, priorityMeta, topics, type Article, type Priority, type Region, type SortOrder } from '../../data/articles';
+import { fromApi, isThinChapter, parseDate, usefulNote, type ApiArticle, type CoverageChapter, type Pagination } from './model';
 import { ArticleLink, ChapterLink, Daiji, onPlainClick, SectionLink, SiteFooter, usePaper } from './Paper';
-import { actionItems, byScore, issueOf, jstParts, kanjiMonthDay, kanjiNum, kanjiTime, monthDay, paperDate, paperDay, paperWeekday, pillarOrder, splitHeadline, zen } from './typeset';
+import { actionItems, countLabel, jstParts, kanjiMonthDay, kanjiNum, kanjiTime, monthDay, paperDate, paperDay, paperWeekday, pillarOrder, splitHeadline, zen } from './typeset';
 import { defaultState, urlFor, type RadarState } from './useRadarState';
 
-export type FrontPageProps = {
+type FrontPageProps = {
   /** Current page of the filtered list (useArticles). */
   articles: Article[];
+  /** The same list, best score first (computed once in RadarApp). */
+  ranked: Article[];
   pagination: Pagination;
   loading: boolean;
   error: string;
@@ -24,28 +26,40 @@ export type FrontPageProps = {
   onSelect: (id: string) => void;
 };
 
-const priorityWords: Record<Priority, string> = { P0: 'きょう対応', P1: '今週検証', P2: '背景学習' };
+const priorityWords: Record<Priority, string> = { P0: priorityMeta.P0.label, P1: priorityMeta.P1.label, P2: priorityMeta.P2.label };
 const priorityClass: Record<Priority, string> = { P0: 'shu', P1: 'p1-text', P2: 'fp-p2' };
-const lensLabels: Record<string, string> = { Regulation: '制度', Government: '行政', 'Engineering Community': '現場', 'Case Study': '事例', Enterprise: '企業' };
-const pillarEnglish: Record<string, string> = { Customer: 'Customer', Build: 'Build', Deploy: 'Deploy', Govern: 'Govern', Organization: 'Organization' };
 const regions: Array<[Region | 'ALL', string]> = [['ALL', 'すべて'], ['Japan', '日本'], ['Global', 'グローバル']];
 const sortOptions: Array<[SortOrder, string]> = [['newest', '新着順'], ['priority', '優先度順'], ['published', '公開日順']];
 
 type Feed = { articles: Article[]; total: number };
 
-/** One side fetch for a box on the page (P0, 日本レンズ, pillar top-ups). */
+/**
+ * Side fetches for boxes on the page (P0, 日本レンズ, pillar top-ups), kept for the session so
+ * returning from 二面 or 三面 does not fetch them again. Five minutes matches the API's cache.
+ */
+const FEED_TTL = 5 * 60_000;
+const feedCache = new Map<string, { feed: Feed; at: number }>();
+const emptyFeed: Feed = { articles: [], total: 0 };
+const topUpUrl = (pillar: string) => `/api/articles?pillar=${encodeURIComponent(pillar)}&pageSize=6`;
+
+async function loadFeed(url: string, signal?: AbortSignal): Promise<Feed> {
+  const hit = feedCache.get(url);
+  if (hit && Date.now() - hit.at < FEED_TTL) return hit.feed;
+  const response = await fetch(url, { signal });
+  if (!response.ok) throw new Error(String(response.status));
+  const data = await response.json() as { articles?: ApiArticle[]; pagination?: { total?: number } };
+  const list = (data.articles ?? []).map(fromApi).filter((item): item is Article => Boolean(item));
+  const feed = { articles: list, total: Number(data.pagination?.total ?? list.length) };
+  feedCache.set(url, { feed, at: Date.now() });
+  return feed;
+}
+
 function useFeed(url: string | null): Feed {
-  const [feed, setFeed] = useState<Feed>({ articles: [], total: 0 });
+  const [feed, setFeed] = useState<Feed>(() => (url && feedCache.get(url)?.feed) || emptyFeed);
   useEffect(() => {
     if (!url) return;
     const controller = new AbortController();
-    fetch(url, { signal: controller.signal })
-      .then((response) => response.ok ? response.json() as Promise<{ articles?: ApiArticle[]; pagination?: { total?: number } }> : Promise.reject(new Error(String(response.status))))
-      .then((data) => {
-        const list = (data.articles ?? []).map(fromApi).filter((item): item is Article => Boolean(item));
-        setFeed({ articles: list, total: Number(data.pagination?.total ?? list.length) });
-      })
-      .catch(() => undefined);
+    loadFeed(url, controller.signal).then(setFeed).catch(() => undefined);
     return () => controller.abort();
   }, [url]);
   return feed;
@@ -60,9 +74,8 @@ function heat(count: number): number {
 }
 
 function clock(value?: string | null): string {
-  if (!value) return '';
-  const date = new Date(/^\d{4}-\d{2}-\d{2} /.test(value) ? `${value.replace(' ', 'T')}Z` : value);
-  if (Number.isNaN(date.getTime())) return '';
+  const date = parseDate(value);
+  if (!date) return '';
   const p = jstParts(date);
   return `${p.hour}:${String(p.minute).padStart(2, '0')}`;
 }
@@ -102,11 +115,10 @@ function Keywords() {
 }
 
 function Masthead({ searchRef, filtersOpen, filterCount, onToggleFilters }: { searchRef: Ref<HTMLInputElement>; filtersOpen: boolean; filterCount: number; onToggleFilters: () => void }) {
-  const { state, update, overview, user, savedIds, openAccount } = usePaper();
+  const { state, update, overview, issue, user, savedIds, openAccount } = usePaper();
   const counts = overview.counts ?? {};
-  const issue = issueOf(parseDate(overview.last_ingested_at));
-  const number = `第${kanjiNum(issue.number)}号`;
-  const md = paperDate(issue.date, { era: false }).replace(/^.+?年/, '');
+  const number = issue ? `第${kanjiNum(issue.number)}号` : '';
+  const md = issue ? paperDate(issue.date, { era: false }).replace(/^.+?年/, '') : '';
   const onSaved = state.channel === 'saved';
   const guide: Array<{ to: 'front' | 'story' | 'questions' | 'japan' | 'saved' | 'about'; label: string; folio: string }> = [
     { to: 'front', label: 'きょうの一面', folio: '一面' },
@@ -120,20 +132,22 @@ function Masthead({ searchRef, filtersOpen, filterCount, onToggleFilters }: { se
     <SectionLink to="front" className="fp-title" label="ＦＤＥレーダー 一面へ">
       <span className="fp-daiji-box tate-always"><Daiji /></span>
       <span className="fp-dateline tate-always">
-        <span className="fp-desk">{paperDay(issue.date)}</span>
-        <span className="fp-desk">{paperWeekday(issue.date)}</span>
-        <span className="fp-desk">{issue.kind}　{number}</span>
-        <span className="fp-desk fp-dim">{kanjiNum(issue.han)}版</span>
-        <span className="fp-mob">{md}</span>
-        <span className="fp-mob">{issue.kind}　{kanjiNum(issue.han)}版</span>
-        <span className="fp-mob fp-dim">{number}</span>
+        {issue && <>
+          <span className="fp-desk">{paperDay(issue.date)}</span>
+          <span className="fp-desk">{paperWeekday(issue.date)}</span>
+          <span className="fp-desk">{issue.kind}　{number}</span>
+          <span className="fp-desk fp-dim">{kanjiNum(issue.han)}版</span>
+          <span className="fp-mob">{md}</span>
+          <span className="fp-mob">{issue.kind}　{kanjiNum(issue.han)}版</span>
+          <span className="fp-mob fp-dim">{number}</span>
+        </>}
       </span>
     </SectionLink>
 
     <dl className="fp-stats" aria-label="収集状況">
-      <div className="fp-stat tate"><dt>収録記事</dt><dd>{kanjiNum(counts.total)}件</dd></div>
-      <div className="fp-stat tate"><dt>うち日本</dt><dd>{kanjiNum(counts.japan)}件</dd></div>
-      <div className="fp-stat tate shu"><dt>きょう対応</dt><dd>{kanjiNum(counts.p0)}件</dd></div>
+      <div className="fp-stat tate"><dt>収録記事</dt><dd>{countLabel(counts.total)}</dd></div>
+      <div className="fp-stat tate"><dt>うち日本</dt><dd>{countLabel(counts.japan)}</dd></div>
+      <div className="fp-stat tate shu"><dt>きょう対応</dt><dd>{countLabel(counts.p0)}</dd></div>
       <div className="fp-stat tate"><dt>最終収集</dt><dd>{kanjiTime(overview.last_ingested_at)}</dd></div>
     </dl>
 
@@ -179,7 +193,7 @@ function FilterStrip({ open }: { open: boolean }) {
   const { state, update } = usePaper();
   const set = (patch: Partial<RadarState>) => { update({ ...patch, article: '' }); };
   return <div id="fp-filters" className="fp-filters" hidden={!open}>
-    {state.channel !== 'saved' && <Options label="種類" value={state.channel} options={[['action', '実務'], ['research', 'リサーチ']]} onPick={(channel) => set({ channel, chapter: '' })} />}
+    {state.channel !== 'saved' && <Options label="種類" value={state.channel} options={[['action', '実務'], ['research', 'リサーチ'], ['career', '求人']]} onPick={(channel) => set({ channel, chapter: '' })} />}
     <Options label="地域" value={state.region} options={regions} onPick={(region) => set({ region })} />
     <Options label="優先度" value={state.priority} options={[['ALL', 'すべて'], ['P0', 'P0 きょう対応'], ['P1', 'P1 今週検証'], ['P2', 'P2 背景学習']]} onPick={(priority) => set({ priority })} />
     <Options label="工程" value={state.chapter ? '' : state.pillar} options={[['すべて', 'すべて'], ...pillarOrder.map((key) => [key, pillarLabels[key]] as [string, string])]} onPick={(pillar) => set({ pillar, chapter: '' })} />
@@ -195,7 +209,7 @@ function Chips() {
   const chapterTitle = state.chapter ? coverage.find((item) => item.id === state.chapter)?.titleJa ?? state.chapter : '';
   const chips: Array<{ key: string; label: string; clear: Partial<RadarState> }> = [
     ...(state.channel === 'saved' ? [{ key: 'saved', label: '保存した記事', clear: { channel: 'action' as const } }] : []),
-    ...(state.channel === 'research' ? [{ key: 'channel', label: 'リサーチ', clear: { channel: 'action' as const } }] : []),
+    ...(state.channel === 'research' || state.channel === 'career' ? [{ key: 'channel', label: state.channel === 'career' ? '求人' : 'リサーチ', clear: { channel: 'action' as const } }] : []),
     ...(state.region !== 'ALL' ? [{ key: 'region', label: state.region === 'Japan' ? '日本' : 'グローバル', clear: { region: 'ALL' as const } }] : []),
     ...(state.priority !== 'ALL' ? [{ key: 'priority', label: `${state.priority} ${priorityWords[state.priority]}`, clear: { priority: 'ALL' as const } }] : []),
     ...(chapterTitle ? [{ key: 'chapter', label: `問い：${chapterTitle}`, clear: { chapter: '', pillar: 'すべて' } }] : []),
@@ -212,8 +226,8 @@ function Chips() {
   </div>;
 }
 
-export function countFilters(state: RadarState): number {
-  return [state.channel === 'research', state.region !== 'ALL', state.priority !== 'ALL', Boolean(state.chapter) || state.pillar !== 'すべて', state.topic !== 'すべて', Boolean(state.query.trim())].filter(Boolean).length;
+function countFilters(state: RadarState): number {
+  return [state.channel === 'research' || state.channel === 'career', state.region !== 'ALL', state.priority !== 'ALL', Boolean(state.chapter) || state.pillar !== 'すべて', state.topic !== 'すべて', Boolean(state.query.trim())].filter(Boolean).length;
 }
 
 /* ---------- 一面トップ ---------- */
@@ -344,7 +358,7 @@ function JapanLens({ feed, selectedId }: { feed: Feed; selectedId: string }) {
     <div className="fp-japan-body tate-row">
       <p className="fp-japan-lede tate">日本は六番目の章ではなく、五つの工程すべてを横切る視点。制度、調達、閉域、現場の言葉で読み替える。</p>
       {picks.length ? <ol className="fp-japan-list">{picks.map((article) => <li key={article.id} className="tate">
-        <span className="fp-lens">{lensLabels[article.japanLens] ?? article.japanLens}</span>
+        <span className="fp-lens">{japanLensLabels[article.japanLens] ?? article.japanLens}</span>
         <ArticleLink article={article} className={selectedId === article.id ? 'is-selected' : ''}>{article.title}</ArticleLink>
       </li>)}</ol> : <p className="fp-empty">日本の記事を読み込んでいます。</p>}
     </div>
@@ -353,8 +367,8 @@ function JapanLens({ feed, selectedId }: { feed: Feed; selectedId: string }) {
 
 function QuestionTable({ coverage }: { coverage: CoverageChapter[] }) {
   const { state, overview } = usePaper();
-  const thin = coverage.filter((item) => item.status === 'thin').length;
-  const healthy = coverage.filter((item) => item.status === 'healthy').length;
+  const thin = coverage.filter(isThinChapter).length;
+  const healthy = coverage.length - thin;
   const updated = clock(overview.last_ingested_at);
   return <section className="fp-map" aria-labelledby="fp-map-head">
     <h2 id="fp-map-head" className="fp-map-head"><span><span className="fp-desk-inline">二十四の問い　記事の厚み</span><span className="fp-mob-inline">二十四の問い</span></span><SectionLink to="questions" className="fp-map-more">三面へ</SectionLink></h2>
@@ -363,8 +377,8 @@ function QuestionTable({ coverage }: { coverage: CoverageChapter[] }) {
       <tbody>{pillarOrder.map((pillar) => <tr key={pillar}>
         <th scope="row">{pillarLabels[pillar]}</th>
         <td><div className="fp-cells">{coverage.filter((item) => item.pillar === pillar).map((item) => <ChapterLink key={item.id} id={item.id}
-          className={`fp-cell ${item.status === 'thin' ? 'is-thin' : `heat-${heat(item.publishedCount)}`}${state.chapter === item.id ? ' is-current' : ''}`}
-          label={`${item.titleJa}　${item.publishedCount}件${item.status === 'thin' ? '　薄い章' : ''}`}>{item.publishedCount}</ChapterLink>)}</div></td>
+          className={`fp-cell ${isThinChapter(item) ? 'is-thin' : `heat-${heat(item.publishedCount)}`}${state.chapter === item.id ? ' is-current' : ''}`}
+          label={`${item.titleJa}　${item.publishedCount}件${isThinChapter(item) ? '　薄い章' : ''}`}>{item.publishedCount}</ChapterLink>)}</div></td>
       </tr>)}</tbody>
     </table> : <p className="fp-empty">集計を読み込んでいます。</p>}
     <p className="fp-map-note">{coverage.length > 0 && <span className="fp-mob-inline">赤枠は一次情報が足りない「薄い章」。</span>}<span className="fp-desk-inline">薄い章 {thin} · 健全 {healthy}{updated && ` · ${updated}更新`}</span>{updated && <span className="fp-mob-inline">{updated}更新。</span>}</p>
@@ -380,7 +394,7 @@ function PillarColumns({ columns, selectedId }: { columns: Array<{ pillar: strin
   const more = columns.flatMap(({ items }) => items.slice(COLUMN_SIZE));
   return <>
   <section className="fp-pillars" aria-label="工程ごとの短信">{columns.map(({ pillar, items: all }) => { const items = all.slice(0, COLUMN_SIZE); return <section key={pillar} className="fp-col" aria-labelledby={`fp-pillar-${pillar}`}>
-    <h2 id={`fp-pillar-${pillar}`}>{pillarLabels[pillar]} <span>{pillarEnglish[pillar]}</span></h2>
+    <h2 id={`fp-pillar-${pillar}`}>{pillarLabels[pillar]} <span>{pillar}</span></h2>
     {items.length ? <ul className="dotted">{items.map((article) => <li key={article.id}><ArticleLink article={article} className={selectedId === article.id ? 'is-selected' : ''}>{article.title}</ArticleLink></li>)}</ul>
       : <p className="fp-empty">この工程の記事はありません。</p>}
   </section>; })}</section>
@@ -399,7 +413,7 @@ function Pager({ pagination }: { pagination: Pagination }) {
   const go = (next: number) => () => { update({ page: next }); window.scrollTo({ top: 0, behavior: 'smooth' }); };
   const nextLabel = state.sort === 'newest' ? '昨日以前の紙面を読む' : '次の面を読む';
   return <nav className="fp-pager" aria-label="紙面送り">
-    {page > 1 ? <StateLink to={{ ...state, page: page - 1 }} className="btn fp-prev" onGo={go(page - 1)}>前の面</StateLink> : <span className="btn fp-prev" aria-disabled="true">前の面</span>}
+    {page > 1 ? <StateLink to={{ ...state, page: page - 1 }} className="btn" onGo={go(page - 1)}>前の面</StateLink> : <span className="btn" aria-disabled="true">前の面</span>}
     <span className="fp-folio">{page} / {total} 面</span>
     {page < total ? <StateLink to={{ ...state, page: page + 1 }} className="btn fp-next" onGo={go(page + 1)}><span className="fp-desk-inline">次の面</span><span className="fp-mob-inline">{nextLabel}</span></StateLink>
       : <span className="btn fp-next" aria-disabled="true">次の面</span>}
@@ -408,13 +422,19 @@ function Pager({ pagination }: { pagination: Pagination }) {
 
 /* ---------- 一面 ---------- */
 
-const FrontPage = forwardRef<HTMLInputElement, FrontPageProps>(function FrontPage({ articles, pagination, loading, error, selectedId, onSelect }, searchRef) {
-  const { state, update, coverage } = usePaper();
+const FrontPage = forwardRef<HTMLInputElement, FrontPageProps>(function FrontPage({ articles, ranked, pagination, loading, error, selectedId, onSelect }, searchRef) {
+  const { state, update, coverage, remember } = usePaper();
   const [filtersOpen, setFiltersOpen] = useState(false);
   const filterCount = countFilters(state);
   const filtered = state.channel === 'saved' || filterCount > 0;
+  // Top-ups only make sense on the first page of the unfiltered paper.
+  const noTopUp = filtered || state.page > 1;
 
-  const ranked = useMemo(() => [...articles].sort(byScore), [articles]);
+  // A shared or stale `?page=N` beyond the last page goes to the last page.
+  useEffect(() => {
+    if (!loading && pagination.total > 0 && state.page > pagination.totalPages) update({ page: pagination.totalPages });
+  }, [loading, pagination.total, pagination.totalPages, state.page, update]);
+
   const top = ranked[0] ?? null;
   const kata = ranked[1] ?? null;
   const second = ranked.slice(2, 5);
@@ -426,28 +446,29 @@ const FrontPage = forwardRef<HTMLInputElement, FrontPageProps>(function FrontPag
 
   // Pillar columns: the rest of this page, topped up to three per column on the unfiltered paper.
   const own = pillarOrder.map((pillar) => rest.filter((article) => pillarOf(article) === pillar));
-  const short = filtered || loading ? [] : pillarOrder.filter((_, index) => own[index].length < 3);
-  const [extra, setExtra] = useState<Record<string, Article[]>>({});
+  const short = noTopUp || loading ? [] : pillarOrder.filter((_, index) => own[index].length < 3);
+  const [extra, setExtra] = useState<Record<string, Article[]>>(() => Object.fromEntries(
+    pillarOrder.flatMap((pillar) => { const hit = feedCache.get(topUpUrl(pillar)); return hit ? [[pillar, hit.feed.articles]] : []; })
+  ));
   const shortKey = short.join(',');
   useEffect(() => {
     if (!shortKey) return;
     const controller = new AbortController();
     for (const pillar of shortKey.split(',')) {
-      if (extra[pillar]) continue;
-      fetch(`/api/articles?pillar=${encodeURIComponent(pillar)}&pageSize=6`, { signal: controller.signal })
-        .then((response) => response.ok ? response.json() as Promise<{ articles?: ApiArticle[] }> : { articles: [] })
-        .then((data) => setExtra((current) => ({ ...current, [pillar]: (data.articles ?? []).map(fromApi).filter((item): item is Article => Boolean(item)) })))
+      loadFeed(topUpUrl(pillar), controller.signal)
+        .then((feed) => setExtra((current) => current[pillar] === feed.articles ? current : { ...current, [pillar]: feed.articles }))
         .catch(() => undefined);
     }
     return () => controller.abort();
-    // `extra` is a cache; refetching when it changes would loop.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shortKey]);
+  useEffect(() => {
+    remember([...p0.articles, ...japan.articles, ...Object.values(extra).flat()]);
+  }, [extra, japan.articles, p0.articles, remember]);
   const onPage = new Set(articles.map((article) => article.id));
   const used = new Set<string>();
   const columns = pillarOrder.map((pillar, index) => {
     const items = [...own[index]];
-    if (!filtered) for (const article of extra[pillar] ?? []) {
+    if (!noTopUp) for (const article of extra[pillar] ?? []) {
       if (items.length >= 3) break;
       if (!onPage.has(article.id) && !used.has(article.id)) items.push(article);
     }

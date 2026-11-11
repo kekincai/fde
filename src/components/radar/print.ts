@@ -48,11 +48,17 @@ function clearSheet() {
  */
 export function installPrintFit(getFileName: () => string): () => void {
   fileName = getFileName;
+  // beforeprint runs under screen media, so a window narrower than 768px measures the mobile
+  // layout. Measure again once print media applies (the print layout is the wide one).
+  const printMedia = window.matchMedia('print');
+  const onPrintMedia = (event: MediaQueryListEvent) => { if (event.matches) fitSheet(); };
   window.addEventListener('beforeprint', fitSheet);
   window.addEventListener('afterprint', clearSheet);
+  printMedia.addEventListener('change', onPrintMedia);
   return () => {
     window.removeEventListener('beforeprint', fitSheet);
     window.removeEventListener('afterprint', clearSheet);
+    printMedia.removeEventListener('change', onPrintMedia);
   };
 }
 

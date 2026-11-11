@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { startAuthentication, startRegistration } from '@simplewebauthn/browser';
 
 import { formatDate, type Session, type User } from './model';
@@ -28,12 +28,35 @@ export default function AuthDrawer({ open, user, bookmarkCount, onClose, onAuthe
     }
   }, [open]);
 
+  // A modal dialog: focus moves in on open, Tab stays inside, and focus returns on close.
+  // The page behind is made inert by RadarApp.
+  const drawerRef = useRef<HTMLElement>(null);
+  // The parent passes a new onClose each render; read it through a ref so the dialog does not re-initialise.
+  const onCloseRef = useRef(onClose);
+  useEffect(() => { onCloseRef.current = onClose; });
   useEffect(() => {
     if (!open) return;
-    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose(); };
+    const returnTo = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const focusables = () => [...(drawerRef.current?.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])') ?? [])];
+    // The close button is first in the DOM; start on the dialog's main action instead.
+    (focusables()[1] ?? focusables()[0])?.focus();
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { onCloseRef.current(); return; }
+      if (event.key !== 'Tab') return;
+      const items = focusables();
+      if (!items.length) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      const inside = drawerRef.current?.contains(document.activeElement);
+      if (event.shiftKey && (document.activeElement === first || !inside)) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && (document.activeElement === last || !inside)) { event.preventDefault(); first.focus(); }
+    };
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose, open]);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      returnTo?.focus({ preventScroll: true });
+    };
+  }, [open]);
 
   async function submit(event: { preventDefault(): void }) {
     event.preventDefault();
@@ -70,22 +93,42 @@ export default function AuthDrawer({ open, user, bookmarkCount, onClose, onAuthe
   }
 
   async function loadSessions() {
-    const response = await fetch('/api/auth/sessions');
-    const payload = await response.json() as { sessions?: Session[] };
-    setSessions(payload.sessions ?? []);
-    setShowSessions(true);
+    setMessage('');
+    try {
+      const response = await fetch('/api/auth/sessions');
+      if (response.status === 401) { onLogout(); return; }
+      if (!response.ok) throw new Error(String(response.status));
+      const payload = await response.json() as { sessions?: Session[] };
+      setSessions(payload.sessions ?? []);
+      setShowSessions(true);
+    } catch {
+      setMessage('セッション一覧を読み込めませんでした。');
+    }
   }
 
   async function revoke(id: string) {
-    await fetch(`/api/auth/sessions/${id}`, { method: 'DELETE' });
-    const target = sessions.find((item) => item.id === id);
-    if (target?.is_current) onLogout();
-    else setSessions((items) => items.filter((item) => item.id !== id));
+    setMessage('');
+    try {
+      const response = await fetch(`/api/auth/sessions/${id}`, { method: 'DELETE' });
+      if (response.status === 401) { onLogout(); return; }
+      if (!response.ok && response.status !== 404) throw new Error(String(response.status));
+      const target = sessions.find((item) => item.id === id);
+      if (target?.is_current) onLogout();
+      else setSessions((items) => items.filter((item) => item.id !== id));
+    } catch {
+      setMessage('セッションを終了できませんでした。');
+    }
+  }
+
+  async function logout() {
+    // The local state is cleared even if the request fails; the server session then expires on its own.
+    await fetch('/api/auth/logout', { method: 'POST' }).catch(() => undefined);
+    onLogout();
   }
 
   return <>
     <button type="button" className={`au-scrim ${open ? 'is-visible' : ''}`} onClick={onClose} aria-label="閉じる" tabIndex={open ? 0 : -1} />
-    <aside className={`au-drawer ${open ? 'is-open' : ''}`} role="dialog" aria-modal="true" aria-labelledby="au-title" aria-hidden={!open} inert={!open ? true : undefined}>
+    <aside ref={drawerRef} className={`au-drawer ${open ? 'is-open' : ''}`} role="dialog" aria-modal="true" aria-labelledby="au-title" aria-hidden={!open} inert={!open ? true : undefined}>
       <header className="au-head">
         <h2 id="au-title">{user ? 'アカウント' : 'ＦＤＥレーダーに参加'}</h2>
         <button type="button" className="au-close" onClick={onClose}>閉じる</button>
@@ -100,6 +143,7 @@ export default function AuthDrawer({ open, user, bookmarkCount, onClose, onAuthe
           {user.isAdmin && <button type="button" className="btn btn-wide" onClick={onAdmin}>管理画面を開く</button>}
           <button type="button" className="btn btn-wide" onClick={loadSessions} aria-expanded={showSessions}>ログイン中の端末・セッションを管理</button>
         </div>
+        {message && <p className="au-error" role="alert">{message}</p>}
         {showSessions && <section className="au-sessions" aria-labelledby="au-sessions-title">
           <h3 id="au-sessions-title" className="kuro-head">ログイン中のセッション</h3>
           <ul>{sessions.map((session) => <li key={session.id}>
@@ -107,7 +151,7 @@ export default function AuthDrawer({ open, user, bookmarkCount, onClose, onAuthe
             <button type="button" className="btn" onClick={() => revoke(session.id)}>終了</button>
           </li>)}</ul>
         </section>}
-        <button type="button" className="btn btn-kuro btn-wide au-logout" onClick={async () => { await fetch('/api/auth/logout', { method: 'POST' }); onLogout(); }}>ログアウト</button>
+        <button type="button" className="btn btn-kuro btn-wide au-logout" onClick={logout}>ログアウト</button>
       </div> : <div className="au-body">
         <p className="au-intro">メールアドレスもパスワードも不要です。端末の Face ID、Touch ID、Windows Hello などで、保存リストを安全に利用できます。</p>
         <div className="au-tabs" role="group" aria-label="ログインまたは新規登録">

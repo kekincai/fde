@@ -4,7 +4,7 @@ import type { Article } from '../../data/articles';
 import { fromApi, type ApiArticle, type Pagination } from './model';
 import type { RadarState } from './useRadarState';
 
-export const PAGE_SIZE = 20;
+const PAGE_SIZE = 20;
 const emptyPagination: Pagination = { page: 1, pageSize: PAGE_SIZE, total: 0, totalPages: 1 };
 
 type Options = { enabled: boolean; userKey: string; onUnauthorized: () => void };
@@ -44,6 +44,9 @@ export function useArticles(state: RadarState, { enabled, userKey, onUnauthorize
         setPagination(data.pagination ?? { ...emptyPagination, total: next.length });
       }).catch((reason) => {
         if (reason instanceof DOMException && reason.name === 'AbortError') return;
+        // Never show the previous list under an error: it would read as the result of this request.
+        setArticles([]);
+        setPagination(emptyPagination);
         setError(reason instanceof Error ? reason.message : '読み込みに失敗しました。');
       }).finally(() => {
         if (!controller.signal.aborted) setLoading(false);

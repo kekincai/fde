@@ -5,9 +5,10 @@
 import { createContext, useContext, type MouseEvent, type ReactNode } from 'react';
 
 import type { Article } from '../../data/articles';
-import { parseDate, type CoverageChapter, type Overview, type User } from './model';
+import { type CoverageChapter, type Overview, type User } from './model';
 import { printPaper } from './print';
-import { issueOf, kanjiNum, paperDate } from './typeset';
+import { REPO_URL, SITE_HOST } from '../../data/site';
+import { kanjiNum, paperDate, type Issue } from './typeset';
 import type { RadarState } from './useRadarState';
 
 export type Section = 'front' | 'story' | 'questions' | 'japan' | 'saved' | 'about' | 'admin';
@@ -16,9 +17,14 @@ export type PaperContextValue = {
   state: RadarState;
   update: (patch: Partial<RadarState>) => void;
   overview: Overview;
+  /** The issue printed in the masthead. Null until the client knows the collection time, so the
+   * static build never bakes in its own date (and hydration does not mismatch). */
+  issue: Issue | null;
   coverage: CoverageChapter[];
   user: User | null;
   savedIds: string[];
+  /** Registers headlines shown outside the main list, so selection and shortcuts can find them. */
+  remember: (articles: Article[]) => void;
   /** URL and handler for each page of the paper. */
   href: (section: Section) => string;
   go: (section: Section) => void;
@@ -85,11 +91,11 @@ const headerNav: Array<{ to: Section; label: string }> = [
 /** Running header for 二面 and 三面: small masthead, date, page navigation, folio. */
 export function PaperHeader({ current, folio }: { current: Section; folio: ReactNode }) {
   const paper = usePaper();
-  const issue = issueOf(parseDate(paper.overview.last_ingested_at));
+  const { issue } = paper;
   const items = paper.user?.isAdmin ? [...headerNav, { to: 'admin' as Section, label: '管理' }] : headerNav;
   return <header className="running-head">
     <SectionLink to="front" className="running-daiji" label="ＦＤＥレーダー 一面へ"><Daiji /></SectionLink>
-    <span className="running-date">{paperDate(issue.date, { era: false })}　{issue.kind}</span>
+    <span className="running-date">{issue ? `${paperDate(issue.date, { era: false })}　${issue.kind}` : ''}</span>
     <nav className="running-nav" aria-label="紙面案内">
       {items.map((item) => <SectionLink key={item.to} to={item.to} current={item.to === current}>{item.label}</SectionLink>)}
       <button type="button" className="running-account" onClick={paper.openAccount}>{paper.user ? paper.user.displayName : 'ログイン'}</button>
@@ -101,21 +107,21 @@ export function PaperHeader({ current, folio }: { current: Section; folio: React
 /** 奥付: name and motto, today's primary sources, colophon links. */
 export function SiteFooter() {
   const paper = usePaper();
-  const issue = issueOf(parseDate(paper.overview.last_ingested_at));
+  const { issue } = paper;
   const names = (paper.overview.sources ?? []).map((source) => source.name).filter(Boolean).slice(0, 10);
   return <footer className="colophon">
     <p className="colophon-name"><Daiji /><span>ＡＩを「試した」で終わらせない、現場のためのフィールドインテリジェンス</span></p>
     <p className="colophon-sources">
-      {names.length > 0 && <><b>きょうの一次情報源</b>　{names.join(' · ')}　／　</>}
+      {names.length > 0 && <><b>主な一次情報源</b>　{names.join(' · ')}　／　</>}
       六時間ごとに収集。本文は保存せず、一次情報へ送ります。
     </p>
     <p className="colophon-links">
       <SectionLink to="about">ＦＤＥとは</SectionLink>
-      <a href="https://github.com/kekincai/fde#privacy" target="_blank" rel="noreferrer">プライバシー</a>
+      <a href={`${REPO_URL}#privacy`} target="_blank" rel="noreferrer">プライバシー</a>
       <a href="/api/overview" target="_blank" rel="noreferrer">ＡＰＩ</a>
-      <a href="https://github.com/kekincai/fde" target="_blank" rel="noreferrer">GitHub</a>
+      <a href={REPO_URL} target="_blank" rel="noreferrer">GitHub</a>
       <button type="button" className="colophon-print" onClick={printPaper}>この面を印刷（ブランケット判）</button>
     </p>
-    <p className="colophon-imprint">ＦＤＥレーダー　{paperDate(issue.date, { era: false })}　{issue.kind}　{kanjiNum(issue.han)}版　fde.kejincai.dev</p>
+    <p className="colophon-imprint">ＦＤＥレーダー　{issue && `${paperDate(issue.date, { era: false })}　${issue.kind}　${kanjiNum(issue.han)}版　`}{SITE_HOST}</p>
   </footer>;
 }

@@ -2,10 +2,16 @@
  * Newspaper typesetting helpers: kanji numerals for vertical text, the dated
  * masthead line, full-width conversion for short vertical labels.
  */
-import type { Article } from '../../data/articles';
+import { pillarOrder, type Article } from '../../data/articles';
+import { SITE_NAME } from '../../data/site';
 import { parseDate } from './model';
 
 const digits = '〇一二三四五六七八九';
+
+/** A count with 件, or a dash while the number is unknown (not loaded / API unavailable). */
+export function countLabel(value: number | undefined | null): string {
+  return typeof value === 'number' ? `${kanjiNum(value)}件` : '―';
+}
 
 /** Positional kanji below 100 (十三, 六), digit by digit from 100 (九八〇, 一五八). */
 export function kanjiNum(value: number | undefined | null): string {
@@ -76,7 +82,8 @@ export function kanjiTime(value?: string | null): string {
   const p = jstParts(date);
   const half = p.hour < 12 ? '午前' : '午後';
   const hour = p.hour % 12;
-  return `${half}${kanjiNum(hour)}時${p.minute >= 30 ? '半' : ''}`;
+  // Newspapers print noon and midnight as 零時 (午後零時半), not 〇時.
+  return `${half}${hour === 0 ? '零' : kanjiNum(hour)}時${p.minute >= 30 ? '半' : ''}`;
 }
 
 /** 創刊: the first issue appeared on 2026-08-09 (JST). */
@@ -118,19 +125,18 @@ export function issueOf(collectedAt?: Date | null, now = new Date()): Issue {
   };
 }
 
-/** FDEレーダー_2026-11-07_朝刊第91号_12版_一面 — the saved PDF's name. */
+/** ＦＤＥレーダー_2026-11-07_朝刊第91号_12版_一面 — the saved PDF's name. */
 export function issueFileName(issue: Issue, folio: string): string {
   const p = jstParts(issue.date);
   const pad = (n: number) => String(n).padStart(2, '0');
-  return `FDEレーダー_${p.year}-${pad(p.month)}-${pad(p.day)}_${issue.kind}第${issue.number}号_${issue.han}版_${folio}`;
+  return `${SITE_NAME}_${p.year}-${pad(p.month)}-${pad(p.day)}_${issue.kind}第${issue.number}号_${issue.han}版_${folio}`;
 }
 
 export function hostOf(url: string): string {
   try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return url; }
 }
 
-/** Pillars in reading order (Customer first). On a vertical page they are laid out right to left. */
-export const pillarOrder = ['Customer', 'Build', 'Deploy', 'Govern', 'Organization'] as const;
+export { pillarOrder };
 
 export const pillarOrdinals = ['第一', '第二', '第三', '第四', '第五'];
 
@@ -148,7 +154,7 @@ export function actionItems(text: string, max = 3): string[] {
 
 /** Splits a title into a main headline and a 袖見出し at the first natural break. */
 export function splitHeadline(title: string): { main: string; sub: string } {
-  const match = title.match(/^(.{6,40}?)[\s　]*[：:｜|―—–\-]\s*(.{4,})$/u) ?? title.match(/^(.{6,40}?)[。！？!?]\s*(.{4,})$/u);
+  const match = title.match(/^(.{6,40}?)[\s　]*[：:｜|―—–-]\s*(.{4,})$/u) ?? title.match(/^(.{6,40}?)[。！？!?]\s*(.{4,})$/u);
   if (match) return { main: match[1].trim(), sub: match[2].trim() };
   return { main: title, sub: '' };
 }

@@ -37,7 +37,7 @@ function readUrl(): RadarState {
   const topic = params.get('topic') ?? '';
   return {
     view,
-    channel: channel === 'research' || channel === 'saved' ? channel : 'action',
+    channel: channel === 'research' || channel === 'career' || channel === 'saved' ? channel : 'action',
     region: region === 'Japan' || region === 'Global' ? region : 'ALL',
     pillar: pillars.includes(pillar) ? pillar : 'すべて',
     topic: topics.includes(topic) ? topic : 'すべて',

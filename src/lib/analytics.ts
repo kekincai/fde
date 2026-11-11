@@ -1,5 +1,5 @@
 export type AnalyticsSection = 'about' | 'action' | 'japan' | 'research' | 'saved' | 'admin';
-export type AnalyticsEvent = 'page_view' | 'section_view' | 'article_open' | 'source_click';
+type AnalyticsEvent = 'page_view' | 'section_view' | 'article_open' | 'source_click';
 
 function visitorId(): string {
   const key = 'fde-radar-visitor';

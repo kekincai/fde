@@ -5,13 +5,9 @@ import {
   IconAlertTriangle,
   IconArticle,
   IconCalendarEvent,
-  IconChartHistogram,
-  IconChartLine,
   IconCircleCheck,
   IconClock,
   IconCloudUpload,
-  IconCompass,
-  IconDatabase,
   IconDatabaseSearch,
   IconDeviceDesktop,
   IconDeviceMobile,
@@ -30,20 +26,16 @@ import {
   type TablerIcon
 } from '@tabler/icons-react';
 
-export type IconName = 'activity' | 'alert' | 'article' | 'calendar' | 'chart' | 'chartLine' | 'check' | 'clock' | 'cloudUpload' | 'compass' | 'database' | 'databaseSearch' | 'desktop' | 'devices' | 'external' | 'eye' | 'heartbeat' | 'layers' | 'lock' | 'messageQuestion' | 'mobile' | 'route' | 'shieldLock' | 'tablet' | 'userPlus' | 'users' | 'world';
+export type IconName = 'activity' | 'alert' | 'article' | 'calendar' | 'check' | 'clock' | 'cloudUpload' | 'databaseSearch' | 'desktop' | 'devices' | 'external' | 'eye' | 'heartbeat' | 'layers' | 'lock' | 'messageQuestion' | 'mobile' | 'route' | 'shieldLock' | 'tablet' | 'userPlus' | 'users' | 'world';
 
 const icons: Record<IconName, TablerIcon> = {
   activity: IconActivity,
   alert: IconAlertTriangle,
   article: IconArticle,
   calendar: IconCalendarEvent,
-  chart: IconChartHistogram,
-  chartLine: IconChartLine,
   check: IconCircleCheck,
   clock: IconClock,
   cloudUpload: IconCloudUpload,
-  compass: IconCompass,
-  database: IconDatabase,
   databaseSearch: IconDatabaseSearch,
   desktop: IconDeviceDesktop,
   devices: IconDevices,
