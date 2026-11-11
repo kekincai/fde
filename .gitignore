@@ -10,3 +10,7 @@ dist/
 .playwright-cli/
 output/
 worker-configuration.d.ts
+
+# Claude Code: share the dev-server launch config, keep local settings out
+.claude/*
+!.claude/launch.json

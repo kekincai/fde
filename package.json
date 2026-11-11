@@ -9,32 +9,38 @@
     "build": "astro build",
     "preview": "astro preview",
     "check": "astro check",
-    "test": "node --experimental-strip-types --test worker/*.test.ts",
+    "lint": "eslint .",
+    "test": "node --import tsx --test \"worker/**/*.test.ts\" \"src/**/*.test.ts\"",
     "cf:dev": "npm run build && wrangler dev",
     "cf:deploy": "npm run build && wrangler deploy",
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
-    "db:migrate:remote": "wrangler d1 migrations apply DB --remote",
-    "db:seed": "wrangler d1 execute DB --local --file=./migrations/0002_seed.sql"
+    "db:migrate:remote": "wrangler d1 migrations apply DB --remote"
   },
   "dependencies": {
-    "@astrojs/react": "^6.0.2",
-    "@simplewebauthn/browser": "^13.3.0",
-    "@simplewebauthn/server": "^13.3.2",
+    "@astrojs/react": "^7.1.7",
+    "@simplewebauthn/browser": "^14.0.0",
+    "@simplewebauthn/server": "^14.1.0",
     "@tabler/icons-react": "^3.46.0",
     "astro": "^7.3.3",
     "fast-xml-parser": "^5.2.5",
     "hono": "^4.13.8",
-    "postgres": "^3.4.9",
+    "postgres": "^4.1.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.10",
     "@cloudflare/workers-types": "^5.20260809.1",
+    "@eslint/js": "^10.0.1",
     "@types/node": "^26.2.0",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
-    "typescript": "^5.8.3",
+    "eslint": "^10.14.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.14.0",
+    "tsx": "^4.23.15",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.72.2",
     "wrangler": "^4.147.0"
   }
 }
